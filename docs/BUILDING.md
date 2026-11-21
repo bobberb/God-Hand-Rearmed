@@ -6,7 +6,7 @@ How to build God Hand: Rearmed (codename Kamite) from source, play it, and work 
 
 ### What you need
 
-1. **Windows 10 or 11** and a reasonably modern graphics card.
+1. **Windows 10 or 11** and a reasonably modern graphics card (Linux: see [Linux and Steam Deck](#linux-and-steam-deck)).
 2. **Visual Studio 2022 Build Tools** with "Desktop development with C++" (free from Microsoft).
 3. **Python 3.10 or newer**.
 4. **Your own disc image of the game** (USA, `.iso`, serial SLUS-21503). It must be this exact version: check it against
@@ -41,6 +41,78 @@ are prepared for your card; later starts take seconds.
 
 Your settings are in `build\port\bin\GHR.ini` (every launcher option is a line there, with a comment), your saves in
 `build\port\bin\memcards\`, your controls in `build\port\bin\controls.ini`.
+
+### Linux and Steam Deck
+
+The same steps work on Linux (x86-64). The easiest toolchain is Nix: `nix develop` at the top of the checkout gives
+CMake, Ninja, GCC, zig, Python, the X11 / Wayland / Vulkan headers and the packaging tools (`flake.nix`). Without Nix,
+install CMake 3.21+, Ninja, a C++20 compiler (GCC 12+ or Clang 16+), Python 3.10+, `pkg-config` and the X11 headers
+(`libx11-dev libxrandr-dev libxinerama-dev libxcursor-dev libxi-dev`), plus `zig` 0.16 for the portable build below
+and `squashfs-tools` and `binutils` to package it. Nix is only a convenience: every step below is plain CMake, Ninja
+and Python, and the flake runs those same steps with pinned sources.
+
+```sh
+git clone https://github.com/God-Hand-Rearmed/God-Hand-Rearmed.git
+cd God-Hand-Rearmed
+nix develop                     # or have the tools above installed
+cp /path/to/your-disc.iso game/
+export KAMITE_ALLOW_DOWNLOADS=1 # the first configure downloads raylib, SDL3, imgui, shaderc...
+python3 -I build.py generate
+python3 -I tools/snr2/snr2.py --iso game/your-disc.iso extract
+python3 -I tools/snr2/gen_modules.py
+python3 -I build.py modules
+python3 -I build.py vu
+python3 -I build.py configure --toolchain cmake/toolchains/linux-portable.cmake
+python3 -I build.py build
+python3 -I build.py characters
+build/port/bin/GHR              # or: python3 -I build.py run
+```
+
+- `--toolchain cmake/toolchains/linux-portable.cmake` builds with zig against glibc 2.31 and a static libc++: the
+  result runs on any x86-64 Linux with glibc 2.31 or newer (SteamOS, Debian 11+, Ubuntu 20.04+), not only on the
+  machine that built it. Leave it out to build with your system's compiler for that machine alone.
+- The renderer on Linux is PCSX2's Vulkan renderer (`libpcsx2gs.so`), drawn into the game window through X11 (on a
+  Wayland desktop through Xwayland; the Steam Deck's Game Mode is Xwayland too). Direct3D 11 does not exist there.
+- Settings, saves and logs are in `build/port/bin`, like on Windows.
+
+To make the files players download (what a release attaches next to the Windows zip):
+
+```sh
+python3 -I build.py configure --toolchain cmake/toolchains/linux-portable.cmake -DKAMITE_RELEASE=ON
+python3 -I build.py build
+python3 -I build.py package      # or: nix run .#package -- --bin build/port/bin
+```
+
+`dist/` then holds `GHR-v<version>-Linux-x64.tar.gz`, `GHR-v<version>-Linux-x64.AppImage` and
+`GHR-v<version>.debug` (GHR's debug info, for reading crash addresses; not for players). The packer
+(`tools/package.py`, the same one that makes the Windows zip: [Releases](#releases)) refuses a build that is not
+portable or that was made on the stand-in game code. What players see is `tools/linux/README-linux.txt` (shipped as
+README.txt).
+
+#### Linux CI
+
+`.github/workflows/ci.yml` runs `nix flake check` on every push and pull request, then starts the packaged AppImage
+and tar.gz on Debian 11, Ubuntu 20.04 and 24.04, Fedora, Arch and the Steam Runtime's sniper. CI has no disc, so
+its builds use a stand-in for the recompiled game code (`tools/linux/stub_game_code.py`): everything else (runtime,
+launcher, renderer, platform code) is compiled, linked and started, and the artifacts are named `-stub`. The checks:
+
+| Check | What it proves |
+|---|---|
+| `native` | GHR builds with GCC on the stand-in code; the C++ unit tests (`tests/unit`, `KAMITE_BUILD_TESTS=ON`) pass |
+| `portable-binary` | the release toolchain's GHR and libraries need glibc 2.31 at most and no library the package lacks |
+| `linux-stub` | `tools/package.py` makes the AppImage and the tar.gz from that build (reproducible: same input, same bytes) |
+| `packaging-tests` | `tools/linux/test_*.py` and `tools/win/test_*.py`: the packer (all three forms), the AppRun play-folder rules, the desktop entry, the stand-in |
+| `launcher-smoke` | the tar.gz's GHR opens its launcher on a 1280x800 virtual screen and draws it (`tools/linux/smoke_launcher.py`) |
+| `launcher-glibc-2-31` | the same on a 2020 userland (nixos-20.09: glibc 2.31, its X11 and Mesa 20.1), the oldest system the package claims |
+| `window-errors` | no display, and an X server without GLX: GHR ends with exit code 1 and says why, instead of crashing |
+
+Run them all locally with `nix flake check -L`, one with `nix build .#checks.x86_64-linux.<name> -L`.
+
+The same workflow's `windows` job builds GHR.exe with MSVC (Visual Studio 2022 on GitHub's Windows image) through
+`build.py`, on the same stand-in game code, as a release build with the unit tests, runs them and starts `GHR.exe
+--help`. Then `build.py package --allow-stub` packs the release zip, which is unpacked with Windows' own unzip and
+started from there, and uploaded as the `windows-stub` artifact next to `linux-stub`. Nix cannot host MSVC, and the
+port builds with MSVC only, so this job runs outside the flake.
 
 ### Options
 
@@ -132,15 +204,35 @@ options were on (60 FPS, aspect ratio, character).
   limit) and turns on the update check. It applies to GHR.exe's own code and the runtime only, so switching it doesn't
   rebuild the generated game code. Dev builds check for updates only with `[Launcher] UpdateTest=1`, and then treat any
   release as newer (to test the updater on a copy of a play folder).
+- **One build process, both systems:** `build.py configure -DKAMITE_RELEASE=ON`, `build.py build`, `build.py
+  package`. The last runs `tools/package.py`, which packs whatever system the build is for into `dist/`: on Windows the
+  zip (and `GHR-v<version>.pdb`, GHR.exe's symbols, copied only when its GUID is the one GHR.exe names; they stay
+  with the maintainer), on Linux the tar.gz and the
+  AppImage ([Linux and Steam Deck](#linux-and-steam-deck): add `--toolchain cmake/toolchains/linux-portable.cmake` to
+  the configure). It ships files by name, never "the bin folder minus what a run left there" (on Windows: GHR.exe and
+  the DLLs it loads, found from the import tables plus `pcsx2gs.dll` and `shaderc_shared.dll`). It refuses a build on
+  the stand-in game code, and on Windows a Debug build (one needing the debug C runtime, which no player has), a
+  truncated or structurally damaged program, a 32-bit one, and an overlay DLL left in the bin folder under a Windows name (ReShade's or DXVK's
+  `dxgi.dll`...). It prints what the programs need from outside the zip (Windows' own DLLs and the Visual C++ Redistributable's).
+  Run twice on one machine, the zip's SHA-256 is the same (across machines only with the same input files and the
+  same zlib: a Windows checkout with autocrlf has CRLF texts in `resources/`, and a zlib-ng Python deflates
+  differently).
 - **The zip:** `GHR-v<version>-Windows-x64.zip` (RecompLauncher picks a release's file by its system and CPU words), a
-  `God Hand Rearmed` folder holding GHR.exe, its DLLs, `resources/`, `recomplauncher.json`, `README.txt`, `LICENSE` and
-  `docs/licenses/`; never `GHR.ini` or `controls.ini` (an update unpacked over the folder must not replace the player's:
-  GHR.exe writes its built-in defaults on the first start and adds new settings to an existing GHR.ini at every start
-  of a release build), saves, logs, caches, `mods/`, tools, symbols or dumps. Characters are built from the player's
-  disc, so none ship. The maintainer's builder packs it and publishes it as a GitHub release named after the tag (a full
+  `God Hand Rearmed` folder holding GHR.exe, its DLLs, `resources/`, `recomplauncher.json`, `README.txt`
+  (`tools/win/README-windows.txt`), `LICENSE` and `docs/licenses/`; never `GHR.ini` or `controls.ini` (an update
+  unpacked over the folder must not replace the player's: GHR.exe writes its built-in defaults on the first start and
+  adds new settings to an existing GHR.ini at every start of a release build), saves, logs, caches, `mods/`, tools,
+  symbols or dumps. Characters are built from the player's disc, so none ship. The maintainer publishes it as a GitHub release named after the tag (a full
   release, not a pre-release: RecompLauncher installs only full releases), with the CHANGELOG lines since the last
   release as its notes and the zip as its one asset (the updater installs the newest release's `.zip`).
 - **RecompLauncher:** `recomplauncher.json` (top level, copied next to GHR.exe by the build) is generated from the
   settings table and the presets: after changing either, run `python -I tools/recomplauncher/gen_manifest.py`
   (`--check` says when it's stale). Its setup step is `GHR.exe --prepare --iso <image>` (no window); started by
   RecompLauncher, the launcher's own update offer stands down.
+- **The Linux files:** `GHR-v<version>-Linux-x64.tar.gz` and `GHR-v<version>-Linux-x64.AppImage`, made by
+  `build.py package` from a portable release build ([Linux and Steam Deck](#linux-and-steam-deck)) and attached
+  to the same release next to the zip. The names are what each updater looks for: Windows takes only the `.zip`, a
+  Linux folder the `-Linux-x64.tar.gz`, an AppImage the `-Linux-x64.AppImage` (`src/kamite/update_archive.cpp`,
+  `pickAsset`). Like the zip they carry no `GHR.ini` or
+  `controls.ini`, nor `recomplauncher.json` (its program is `GHR.exe`; RecompLauncher's Linux side is not set up yet).
+  The `.debug` file stays with the maintainer.

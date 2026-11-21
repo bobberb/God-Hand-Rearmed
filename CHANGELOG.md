@@ -2,8 +2,29 @@
 
 Newest first, one line per change; the code comments say how.
 
+## November 21, 2026
+
+- Performance: more of the game's vector helpers (normalize, cross product, camera and light matrices, copies) and the queueing of draw packets run as native code.
+- Launcher: clicks in the Options book no longer land on the row above (or below) the one under the mouse.
+- Performance: the draw data sent to the PS2's vector unit each frame is gathered in one pass (about twice as fast in crowded scenes).
+- Fixed the monitor turning off mid-game when playing with a controller (Windows' screen timeout) (#12).
+- Linux and Steam Deck: the screen no longer blanks mid-game when playing with a controller either (#12). The desktop is asked not to (the freedesktop ScreenSaver inhibit, which KDE and the Deck's Desktop Mode have, else GNOME's session manager), and the X server's own screensaver timer is reset every 30 s. Not yet on a Wayland desktop that has neither (sway and the like).
+- Performance: the game's matrix, rotation and sine / cosine helpers (libvu0's MulMatrix, ApplyMatrix, RotMatrixX / Y / Z, ecossin) run as native code.
+- Controls: Swap Sticks (Controls > Controller) for left-handed play.
+- Launcher: the window follows Display Mode at once and switches on F11, as the game does.
+- Controller: Select's SAVE / LOAD (and the paddles' save-state commands) no longer fire in the pause menu, its pages or on the title screen.
+- Options: Invert Camera Y-Axis (Controls > Camera, under Modern) for the free camera's stick and mouse.
+- Fixed the remaining music skips on G-Sync / FreeSync displays (#1).
+- Fixed music cutting out on PCs that can't hold full speed at 60 FPS: the sound is time-stretched while the game runs slow (#5).
+
 ## November 20, 2026
 
+- Mods: a mod can replace one entry of the game's sound archives (a music track in bgm\bgm00.afs, a cutscene's audio in se\ev, a room's sounds in se) by its name or number, as ADX, WAV, OGG or MP3: GHR converts it once and keeps the copy; loop tags (LOOPSTART / LOOPLENGTH) set the loop, else the track loops as the game's did.
+- Faster game logic: floating-point maths runs on your CPU's own units with the PS2's rounding, limits and divide-by-zero results, in the game's vector maths too.
+- Widescreen: Blackjack's Win / Lose and the slots' pay table no longer turn the picture 4:3 (and keep it so until you leave the game).
+- Modern: Hold has a mode: Hold to Brawl (as before) or Hold to Cam (brawl mode unless L1 is held: holding L1 is the free camera, a tap of L1 the 180° turn).
+- Controls: Left / Right Stick Deadzone sliders (launcher and in game) for drifting sticks.
+- Music no longer skips every ~15 s on variable-refresh (G-Sync / FreeSync) displays: the game stops following such a display's refresh (issue #1).
 - Mods: a mod is a folder in mods\ (a mod.ini, game files under their disc paths, textures\ ahead of your texture pack, patches\*.pnach), loaded in the Mods tab's order: the lower mod wins a file both replace.
 - Launcher: the Mods tab lists your mods: tick them on or off, move them up or down (the marks by the number, LT / RT, Z / C), see what each one overrides; a new mod comes in on, at the bottom; Install from Zip and Open Mods Folder.
 - Save states remember the mods they were made with: loading one with other mods on says what differs, then loads.
@@ -27,6 +48,16 @@ Newest first, one line per change; the code comments say how.
 
 ## November 19, 2026
 
+- Linux and Steam Deck: God Hand: Rearmed runs natively on Linux (no Proton), as an AppImage or a tar.gz folder, on any x86-64 distro with glibc 2.31 or newer (SteamOS included).
+- Linux: PCSX2's Vulkan renderer, presenting through X11 (Xwayland on Wayland desktops and in the Deck's Game Mode); the in-game OPTIONS screen with it.
+- Linux: controllers through SDL3 like on Windows (the Deck's own controls through Steam Input).
+- Linux: the AppImage keeps settings and saves in ~/.local/share/GodHandRearmed, or in a GHR-data folder you make next to it; the tar.gz folder keeps them inside, like the Windows zip.
+- Linux: the launcher picks the disc image with your desktop's file chooser (zenity or kdialog) and also finds one in ~/Games, ~/Downloads or on an SD card.
+- Linux: Add to Steam works with Steam's native and Flatpak installs; the shortcut starts the AppImage (or the folder's GHR).
+- Linux: updates install in place (the AppImage replaces itself; the folder takes the new tar.gz); settings, saves and mods untouched.
+- Steam Deck: a fresh install starts fullscreen at the Deck's 16:10.
+- Linux: a crash writes its [crash] lines (signal, address, backtrace) to the log like on Windows; no desktop session gives a plain message instead of a crash.
+- Builds: Linux CI (nix flake check) builds everything but the game itself on every push, packs the AppImage and tar.gz, and starts them on Debian 11, Ubuntu 20.04 and 24.04, Fedora, Arch and the Steam Runtime.
 - 60 FPS: the title screen runs at the PS2's speed (Press Start's blink, the menus' glows, slides and fades, the boot logos).
 - 60 FPS: the memory-card screens run at the PS2's speed (the cursor arrows, the dimming, the progress bars and their waits).
 - 60 FPS: a stage's results slide in and count up at the PS2's speed, the gold roll's ticks too.

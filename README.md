@@ -28,6 +28,20 @@ screen, with as much or as little of our own nonsense as you want.
 
 The first start compiles shaders for your GPU, so the screen may stay black before coming back. Patience, young ass-whooper.
 
+### Linux and Steam Deck
+
+1. Grab `GHR-v…-Linux-x64.AppImage` (one file) or `GHR-v…-Linux-x64.tar.gz` (a folder) from
+   [Releases](https://github.com/God-Hand-Rearmed/God-Hand-Rearmed/releases).
+2. AppImage: make it executable (file manager > Properties > Is executable, or `chmod +x`) and run it. Settings and
+   saves go to `~/.local/share/GodHandRearmed` (or into a `GHR-data` folder you make next to the AppImage).
+   Folder: unpack it anywhere you can write to and run `GHR`; it keeps everything inside, like the Windows zip.
+3. Point the launcher at your disc image once (it also looks in `~/Games`, `~/Downloads` and on your SD card), pick a
+   preset, "**Play**"!
+4. **Steam Deck:** do steps 1 to 3 in Desktop Mode, then hit **Add to Steam** in the launcher: back in Game Mode it's in
+   your library with its artwork, fullscreen at the Deck's 16:10.
+
+Needs glibc 2.31 or newer (any distro from 2020 on, SteamOS included) and a Vulkan driver.
+
 When a new version is out, the launcher says so: **What's new** shows the changes, **Update** installs them and
 restarts. Your settings, saves, and mods stay where they are.
 
@@ -37,7 +51,8 @@ restarts. Your settings, saves, and mods stay where they are.
 
 ### God Hand - Gone Native!
 
-Recompiled as a Windows program under Vulkan or DX11; PCSX2 as the renderer until later.
+Recompiled as a Windows program under Vulkan or DX11, and a Linux / Steam Deck one under Vulkan; PCSX2 as the renderer
+until later.
 
 ---
 
@@ -48,7 +63,7 @@ True 60FPS (fists punching swiftly) game logic, that by a thousand fixes was ach
 <!-- MEDIA: assets/readme/60fps.gif — 30 vs 60 side by side -->
 ---
 
-### Wider Than Yo Momma!
+### Wider Than Yo Momma's!
 
 I'll kick up your goddamn Aspect Ratio, boy! 
 
@@ -57,7 +72,7 @@ invited to kick your ass, too! <!-- tag:AspectRatio --> `Remastered+`
 
 No UI stretching in gameplay; menus at 4:3 unless you like 'em on the thicker side!
 
-<!-- MEDIA: assets/readme/ultrawide.jpg — a fight at 21:9 or 32:9 -->
+![God Hand: Rearmed](assets/wide_ass.webp)
 ---
 
 ### Modern Controls, Tank Me Later!
@@ -204,6 +219,8 @@ Every option, with the same help text you'll see in the launcher and in game.
 **Controller**
 
 - **Vibration:** Controller rumble. Girls know what it's for.
+- **Left Stick Deadzone:** How far the left stick must move before it counts. Raise it if Gene walks on his own. *0% to 50%*
+- **Right Stick Deadzone:** How far the right stick must move before it counts. Raise it if the camera drifts or Gene dodges on his own. *0% to 50%*
 - **Menu Controls:** Western: bottom button confirms; right cancels. Japanese: right button confirms; bottom cancels. *Western / Japanese / Classic*
 
 </details>
@@ -270,6 +287,7 @@ Every option, with the same help text you'll see in the launcher and in game.
 
 - **Control Style: Pad:** Classic: PS2's OG fixed facing brawling. Modern (rebindable): Toggle Brawl (R3) | Hold to Brawl (L1). *Classic / Modern: Toggle / Modern: Hold* (F2 > Controls changes it while playing) `Remastered+`
   - **Modern: Auto:** Brawling starts when dealing or taking damage. Press the stick (rebindable) to go back to freecam.
+  - **Modern: Hold Mode:** Hold to Brawl: hold L1 to brawl, double-tap it to turn. Hold to Cam: hold L1 for freecam, tap it to turn. *Hold to Brawl / Hold to Cam* `Remastered+`
   - **Modern: Auto:** Brawling starts when dealing or taking damage. It stops once no enemy is near. `Remastered+`
 - **Control Style: KBM:** Keyboard & mouse. Classic: PS2's OG brawling. Modern: mouse freecam. *Classic / Modern: Toggle* `Remastered+`
   - **Modern: Auto:** Brawling starts when dealing or taking damage. Middle-click (rebindable) to go back to freecam.
@@ -353,7 +371,7 @@ The shaders are being compiled for your GPU. Once. After that it's quick.
 The exe isn't signed (certificates cost money; this is free). **More info > Run anyway**.
 
 **Steam Deck? Linux?**
-Coming. For now it's Windows; Proton may run it, but no promises for now.
+Yes, natively: the AppImage or the tar.gz ([Linux and Steam Deck](#linux-and-steam-deck)). No Proton needed.
 
 **Will my PCSX2 texture pack work?**
 Yes: packs in PCSX2's format (a `replacements` folder). Put it in `textures/SLUS-21503` next to GHR.exe, or point the
@@ -363,7 +381,8 @@ launcher's **Mods > Texture Packs** at it.
 The port keeps its own memory card in `memcards\mc0`.
 
 **Where are my saves?**
-`memcards\mc0` (the game's saves) and `states` (save states), next to GHR.exe. Updates never touch them.
+`memcards\mc0` (the game's saves) and `states` (save states), next to GHR.exe (Linux AppImage:
+`~/.local/share/GodHandRearmed`). Updates never touch them.
 
 **How do I update?**
 Start the launcher. If a new version is out, press **Update**. That's it!
@@ -380,7 +399,7 @@ you saw.
 
 ## Coming Soon
 
-- **Linux / Steam Deck, Android and Mac.**
+- **Android and Mac.**
 - **Photo mode** with a free camera.
 - **Subtitles** for the cutscenes.
 - **More playable characters.**
@@ -411,6 +430,8 @@ and testing from the boys.
   boundaries and structures.
 - The "60 Fps" and "Widescreen 16:9" PCSX2 patches for SLUS-21503 (Puggsy and others): where the 60 FPS mode and the
   aspect-ratio support started.
+- [GT3 Revisited](https://github.com/matt-pulsipher/GT3-revisited) (MIT): the PS2's exact float arithmetic (the EE's adder,
+  multiplier and divider, worked out by its authors).
 - [anasrar/chihuahua](https://github.com/anasrar/chihuahua) (MIT): file-format knowledge and the motion reader.
 - [akitotheanimator/God-Hand-Tools](https://github.com/akitotheanimator/God-Hand-Tools) (with CarLoiD, Kerilk and Roni
   Evil): model, motion and motion-event formats.

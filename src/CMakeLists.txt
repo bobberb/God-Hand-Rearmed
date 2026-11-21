@@ -11,7 +11,9 @@ else()
     set(KAMITE_ARCH_FLAG "")
 endif()
 
-set(KAMITE_GENERATED_DIR "${CMAKE_SOURCE_DIR}/generated")
+# Where build.py generate writes the recompiled game code. A cache path so a disc-free build (CI, tools/linux/
+# stub_game_code.py) can point it at a stand-in that has the same entry points and no game code.
+set(KAMITE_GENERATED_DIR "${CMAKE_SOURCE_DIR}/generated" CACHE PATH "The recompiled game code (build.py generate)")
 set(KAMITE_RUNTIME_INCLUDE "${CMAKE_SOURCE_DIR}/runtime/ps2xRuntime/include")
 
 if(NOT EXISTS "${KAMITE_GENERATED_DIR}/register_functions.cpp")
@@ -72,6 +74,9 @@ set(KAMITE_HOST_SOURCES
     kamite/hitbox_overlay.cpp
     kamite/menu_buttons.cpp
     kamite/mod_list.cpp
+    kamite/adx_codec.cpp
+    kamite/afs_archive.cpp
+    kamite/mod_audio.cpp
     kamite/mods.cpp
     kamite/modern_controls.cpp
     kamite/near_geometry.cpp
@@ -79,6 +84,12 @@ set(KAMITE_HOST_SOURCES
     kamite/render/clip_scenery.cpp
     kamite/render/scenery_strip.cpp
     kamite/render/vu1_programs.cpp
+    kamite/native/native.cpp
+    kamite/native/shadow.cpp
+    kamite/native/libvu0.cpp
+    kamite/native/packet.cpp
+    kamite/native/recording.cpp
+    kamite/native/chain_digest.cpp
     kamite/crash_history.cpp
     kamite/hud_layout.cpp
     kamite/hotkeys.cpp
@@ -108,6 +119,9 @@ set(KAMITE_HOST_SOURCES
     kamite/prompt_art.cpp
     kamite/sha256.cpp
     kamite/thread_policy.cpp
+    kamite/paths.cpp
+    kamite/steam_deck.cpp
+    kamite/crash_posix.cpp
 )
 
 # GHR.ini (top level) is built into GHR.exe as its default settings: kamite_generated/kamite/default_ini.h.
@@ -257,7 +271,7 @@ endif()
 # per-module PCH (~160 MB each) would cost ~13 GB for 81 modules. The module headers are not in the PCH (each source
 # includes its own "<mod>_functions.h" from its folder). kamite_generated/kamite/module_index.cpp lists the packs
 # (and keeps the linker from dropping them).
-set(KAMITE_MODULES_DIR "${CMAKE_SOURCE_DIR}/generated_modules")
+set(KAMITE_MODULES_DIR "${CMAKE_SOURCE_DIR}/generated_modules" CACHE PATH "The recompiled SNR2 modules (build.py modules)")
 file(GLOB KAMITE_MODULE_PACKS CONFIGURE_DEPENDS "${KAMITE_MODULES_DIR}/*/*_pack.cpp")
 set(KAMITE_MODULE_SOURCES "")
 set(KAMITE_MODULE_DECLS "")
@@ -318,10 +332,11 @@ file(WRITE "${KAMITE_MODULE_INDEX}.tmp"
 file(COPY_FILE "${KAMITE_MODULE_INDEX}.tmp" "${KAMITE_MODULE_INDEX}" ONLY_IF_DIFFERENT)
 
 add_executable(kamite ${KAMITE_HOST_SOURCES} "${KAMITE_MODULE_INDEX}")
-# The native VU1 programs (kamite/render) round every float operation on its own, as the VU does: no contraction into
-# FMA (MSVC's /fp:precise below does not contract).
+# The native VU1 programs (kamite/render) and native EE functions (kamite/native) round every float operation on its
+# own, as the VU / EE does: no contraction into FMA (MSVC's /fp:precise below does not contract).
 if(NOT MSVC)
     set_source_files_properties(kamite/render/character_skin.cpp kamite/render/clip_scenery.cpp kamite/render/scenery_strip.cpp
+                                kamite/native/libvu0.cpp kamite/native/packet.cpp
                                 PROPERTIES COMPILE_OPTIONS "-ffp-contract=off")
 endif()
 if(KAMITE_RELEASE) # CMakeLists.txt: GHR.exe's own code and the runtime, not the generated game code
@@ -366,6 +381,15 @@ add_custom_target(kamite_resources
     COMMAND ${CMAKE_COMMAND} -E copy_if_different "${CMAKE_SOURCE_DIR}/recomplauncher.json" "$<TARGET_FILE_DIR:kamite>/recomplauncher.json"
     COMMENT "Copying the port's resources")
 add_dependencies(kamite kamite_resources)
+# A build on the stand-in game code (tools/linux/stub_game_code.py: CI, packaging tests) says so next to the binary,
+# and tools/package.py refuses to make a release of it. A real build removes a marker a stub build left.
+set(KAMITE_STUB_NOTE "${CMAKE_BINARY_DIR}/bin/STUB-GAME-CODE.txt")
+if(EXISTS "${KAMITE_GENERATED_DIR}/KAMITE_STUB")
+    message(STATUS "Kamite: building on the STAND-IN game code (${KAMITE_GENERATED_DIR}); this GHR cannot play the game")
+    file(WRITE "${KAMITE_STUB_NOTE}" "Built on the stand-in game code (tools/linux/stub_game_code.py): not a playable build.\n")
+else()
+    file(REMOVE "${KAMITE_STUB_NOTE}")
+endif()
 target_include_directories(kamite PRIVATE
     "${CMAKE_CURRENT_SOURCE_DIR}"
     "${CMAKE_CURRENT_BINARY_DIR}/kamite_generated"
@@ -382,6 +406,14 @@ if(MSVC)
     # runtime objects only. The generated game code never gets /GL (above), so it is not part of that step.
     target_link_options(kamite PRIVATE /FORCE:MULTIPLE /STACK:16777216 $<$<CONFIG:RelWithDebInfo>:/LTCG>)
     target_link_libraries(kamite PRIVATE dbghelp winmm)
+endif()
+
+if(UNIX AND NOT APPLE AND NOT ANDROID)
+    # Linux: libcurl is opened with dlopen (launcher_platform.cpp), which glibc before 2.34 keeps in libdl. The
+    # shared libraries GHR ships (libSDL3.so.0) sit next to it: $ORIGIN finds them wherever the folder or the
+    # AppImage is.
+    target_link_libraries(kamite PRIVATE ${CMAKE_DL_LIBS})
+    set_target_properties(kamite PROPERTIES BUILD_WITH_INSTALL_RPATH ON INSTALL_RPATH "\$ORIGIN")
 endif()
 
 # The launcher's saloon (resources/saloon, claude/saloon-launcher.md) is AVIF: libavif with dav1d to decode it, fetched
@@ -432,14 +464,14 @@ if(KAMITE_DEBUG_UI AND TARGET rlImGui)
     target_compile_definitions(kamite PRIVATE PS2X_ENABLE_DEBUG_UI=1)
     # The launcher (src/kamite/launcher.cpp) draws with the same Dear ImGui.
     target_sources(kamite PRIVATE kamite/launcher.cpp kamite/launcher_bark.cpp kamite/launcher_book.cpp kamite/launcher_platform.cpp
-                                  kamite/launcher_update.cpp kamite/mod_zip.cpp)
+                                  kamite/launcher_update.cpp kamite/update_archive.cpp kamite/mod_zip.cpp)
     target_compile_definitions(kamite PRIVATE KAMITE_HAS_LAUNCHER=1)
     if(WIN32)
         target_link_libraries(kamite PRIVATE winhttp) # downloads: updates, Add to Steam's art
     endif()
     # Add to Steam (src/kamite/launcher_steam.cpp): desktop only, left out of the Android build.
     if(KAMITE_STEAM_SHORTCUT)
-        target_sources(kamite PRIVATE kamite/launcher_steam.cpp)
+        target_sources(kamite PRIVATE kamite/launcher_steam.cpp kamite/steam_shortcuts.cpp)
         target_compile_definitions(kamite PRIVATE KAMITE_STEAM_SHORTCUT=1)
     endif()
 endif()

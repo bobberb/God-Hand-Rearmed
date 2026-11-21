@@ -753,6 +753,10 @@ namespace
 }
 
 void ps2xHostVsyncSetWindow(void *window) noexcept; // Kernel/host_vsync.cpp
+// Kernel/host_window_win32.cpp; Linux: Kernel/host_keep_awake_linux.cpp (runtime/keep_awake.h). Issue #12.
+#if defined(_WIN32) || (defined(__linux__) && !defined(__ANDROID__))
+void ps2xHostKeepDisplayAwake() noexcept;
+#endif
 #if defined(_WIN32)
 bool ps2xHostReplacesLauncherWindow() noexcept; // Kernel/host_window_win32.cpp
 void ps2xHostHandoffCoverShow(void *window) noexcept;
@@ -1143,6 +1147,56 @@ static void keepBorderlessBehind()
         ClearWindowState(FLAG_WINDOW_TOPMOST);
 }
 
+// Whether leaving fullscreen goes back to a maximized window (it was one when fullscreen began).
+static bool s_restoreMaximized = false;
+
+void ps2_host_display::applyMode(int mode)
+{
+    if (!IsWindowReady())
+        return;
+    ps2_host_input::releaseMouse();
+    const bool full = IsWindowState(FLAG_BORDERLESS_WINDOWED_MODE);
+    if (mode == 2)
+    {
+        if (!full)
+        {
+            s_restoreMaximized = IsWindowMaximized();
+            ToggleBorderlessWindowed();
+            keepBorderlessBehind();
+        }
+    }
+    else
+    {
+        if (full)
+            ToggleBorderlessWindowed();
+        if (mode == 1 && !IsWindowMaximized())
+            MaximizeWindow();
+        else if (mode == 0 && IsWindowMaximized())
+            RestoreWindow();
+        s_restoreMaximized = mode == 1;
+    }
+    ps2_host_display::startFullscreen = mode == 2;
+    ps2_host_display::startMaximized = mode == 1;
+}
+
+int ps2_host_display::toggleFullscreen()
+{
+    if (!IsWindowReady())
+        return 0;
+    ps2_host_input::releaseMouse();
+    const bool leavingFullscreen = IsWindowState(FLAG_BORDERLESS_WINDOWED_MODE);
+    if (!leavingFullscreen)
+        s_restoreMaximized = IsWindowMaximized();
+    ToggleBorderlessWindowed();
+    keepBorderlessBehind();
+    if (leavingFullscreen && s_restoreMaximized)
+        MaximizeWindow();
+    const int mode = !leavingFullscreen ? 2 : s_restoreMaximized ? 1 : 0;
+    ps2_host_display::startFullscreen = mode == 2;
+    ps2_host_display::startMaximized = mode == 1;
+    return mode;
+}
+
 // requestWindowShape: a plain window takes the display's aspect (the aspect ratio changed while playing).
 static void shapeWindowToAspect()
 {
@@ -1165,12 +1219,30 @@ static void shapeWindowToAspect()
     SetWindowPosition(static_cast<int>(origin.x) + std::max(0, (monitorWidth - width) / 2),
                       static_cast<int>(origin.y) + std::max(0, (monitorHeight - height) / 2));
 }
+#else
+void ps2_host_display::applyMode(int) {}
+int ps2_host_display::toggleFullscreen() { return 2; }
 #endif
 
 
 // The game window (raylib): made once, by the port's launcher or by PS2Runtime::initialize; a second call keeps the
 // window (except a launcher's borderless one on Windows, below) and applies the size and fullscreen settings again if
 // they changed.
+#if defined(__linux__) && !defined(__ANDROID__) && !defined(PLATFORM_VITA)
+// GLFW, built into raylib (rglfw.c): started before InitWindow to tell a missing display from a working one.
+extern "C" int glfwInit(void);
+using Ps2xGlfwErrorFn = void (*)(int, const char *);
+extern "C" Ps2xGlfwErrorFn glfwSetErrorCallback(Ps2xGlfwErrorFn callback);
+// The window probe below (glfw3.h's values; raylib does not expose GLFW's header).
+struct GLFWwindow;
+extern "C" void glfwDefaultWindowHints(void);
+extern "C" void glfwWindowHint(int hint, int value);
+extern "C" GLFWwindow *glfwCreateWindow(int width, int height, const char *title, void *monitor, GLFWwindow *share);
+extern "C" void glfwDestroyWindow(GLFWwindow *window);
+constexpr int kGlfwVisible = 0x00020004, kGlfwContextMajor = 0x00022002, kGlfwContextMinor = 0x00022003,
+              kGlfwForwardCompat = 0x00022006, kGlfwProfile = 0x00022008, kGlfwCoreProfile = 0x00032001;
+#endif
+
 void ps2_host_display::openHostWindow(const char *title)
 {
 #if defined(PLATFORM_VITA)
@@ -1204,10 +1276,59 @@ void ps2_host_display::openHostWindow(const char *title)
     if (!IsWindowReady())
     {
         SetConfigFlags(FLAG_WINDOW_RESIZABLE | FLAG_WINDOW_ALWAYS_RUN | (ps2_host_display::vsyncEnabled() ? FLAG_VSYNC_HINT : 0u));
+#if !defined(_WIN32)
+        GSPcsx2Backend::BeforeHostWindow(); // Linux: GLFW on X11 for PCSX2's GS (its child window is an X11 one)
+#endif
+#if defined(__linux__) && !defined(__ANDROID__)
+        // raylib 5.5's InitWindow logs "Failed to initialize GLFW" and goes on regardless: rlglInit then calls GL
+        // through null pointers and the process dies inside InitWindow. GLFW is started here first (raylib's own
+        // glfwInit then returns at once): without a desktop session (DISPLAY / WAYLAND_DISPLAY unset) or with libX11 /
+        // libwayland missing, a plain message and exit code 1 (initialisation failed) instead of a segfault.
+        glfwSetErrorCallback([](int code, const char *description)
+                             { std::cerr << "[window] GLFW error " << code << ": " << (description ? description : "") << std::endl; });
+        if (glfwInit() == 0)
+        {
+            const char *x11 = std::getenv("DISPLAY");
+            const char *wayland = std::getenv("WAYLAND_DISPLAY");
+            std::cerr << "[window] error: could not open the game window (GLFW could not start; DISPLAY="
+                      << (x11 && *x11 ? x11 : "(unset)") << ", WAYLAND_DISPLAY=" << (wayland && *wayland ? wayland : "(unset)")
+                      << "). GHR needs a desktop session with X11 or Wayland and the system's libX11 / libwayland-client "
+                         "and an OpenGL driver."
+                      << std::endl;
+            std::fflush(stdout);
+            std::fflush(stderr);
+            std::_Exit(1);
+        }
+        // GLFW up, but can it make raylib's window? raylib 5.5 does not stop when glfwCreateWindow fails: InitPlatform
+        // goes on to GetCurrentMonitor with no window and crashes inside GLFW. A hidden window with the context raylib
+        // asks for (rcore_desktop_glfw.c: OpenGL 3.3 core, no forward compatibility) is made and dropped first; no GLX
+        // on the X server, or no OpenGL 3.3 driver, then ends in a plain message and exit code 1.
+        glfwDefaultWindowHints();
+        glfwWindowHint(kGlfwVisible, 0);
+        glfwWindowHint(kGlfwContextMajor, 3);
+        glfwWindowHint(kGlfwContextMinor, 3);
+        glfwWindowHint(kGlfwProfile, kGlfwCoreProfile);
+        glfwWindowHint(kGlfwForwardCompat, 0);
+        GLFWwindow *probe = glfwCreateWindow(64, 64, "GHR", nullptr, nullptr);
+        glfwDefaultWindowHints();
+        if (probe == nullptr)
+        {
+            std::cerr << "[window] error: could not create the game window: the system gave no OpenGL 3.3 context "
+                         "(no GLX on the X server, or no OpenGL driver installed; the GLFW error above says which)."
+                      << std::endl;
+            std::fflush(stdout);
+            std::fflush(stderr);
+            std::_Exit(1);
+        }
+        glfwDestroyWindow(probe);
+#endif
         InitWindow(HOST_WINDOW_WIDTH, HOST_WINDOW_HEIGHT, title);
     }
     else if (!showWhenShaped)
         SetWindowTitle(title);
+#if defined(_WIN32) || (defined(__linux__) && !defined(__ANDROID__))
+    ps2xHostKeepDisplayAwake(); // the screen timeout ignores controllers (issue #12)
+#endif
     // Window size (PS2X_WINDOW_SIZE): "auto" (default) = the internal resolution's height (448 x PS2X_GS_SCALE, at most
     // 9/10 of the monitor's) in the display's shape, centered; "<w>x<h>" = that client size, centered; "native" = HOST_WINDOW_WIDTH x HOST_WINDOW_HEIGHT as before.
     const char *sizeValue = std::getenv("PS2X_WINDOW_SIZE");
@@ -1676,6 +1797,19 @@ namespace
         const ModuleSlot *moduleSlot = moduleFunctionSlot(address);
         return moduleSlot ? moduleSlot->load(std::memory_order_relaxed) : nullptr;
     }
+
+    // anyFunction for the generated code's calls and jumps (callGuestFunctionAs, dispatchGuestBranch), inline: an
+    // aligned target inside the generated table's [base, end) is its slot, exactly as generatedFunctionTableSlot finds
+    // it (end - base is a multiple of 4, so offset < 4 x slots <=> address < end; an address below base wraps past the
+    // count); anything else (room DLLs' modules, misaligned) goes to anyFunction. anyFunction itself was a call and
+    // ~5% of the EE samples in K's replays of bb97dcb (claude/gt3-revisited.md "Audit").
+    PS2_FORCEINLINE PS2Runtime::RecompiledFunction branchTarget(uint32_t address)
+    {
+        const uint32_t offset = address - g_ps2RecompiledFunctionTableBase;
+        if ((offset >> 2) < g_ps2RecompiledFunctionTableSlotCount && (address & 3u) == 0u)
+            return g_ps2RecompiledFunctionTable[offset >> 2];
+        return anyFunction(address);
+    }
 }
 
 std::atomic<uint32_t> g_ps2xPatchFlags{0u};
@@ -2079,7 +2213,7 @@ bool PS2Runtime::dispatchGuestBranch(uint8_t *rdram,
     RecompiledFunction targetFn = nullptr;
     if (singleLookup)
     {
-        targetFn = anyFunction(targetPc);
+        targetFn = branchTarget(targetPc);
     }
     else if (hasFunction(targetPc))
         targetFn = lookupFunction(targetPc);
@@ -2145,7 +2279,7 @@ static PS2_FORCEINLINE bool callGuestFunctionAs(PS2Runtime &runtime, EeScheduler
                                                 R5900Context *ctx, uint32_t targetPc, uint32_t sourcePc,
                                                 uint32_t fallthroughPc, PS2Runtime::GuestBranchKind kind)
 {
-    PS2Runtime::RecompiledFunction fn = anyFunction(targetPc);
+    PS2Runtime::RecompiledFunction fn = branchTarget(targetPc);
     if (fn == nullptr || g_branchTraceSize != 0u || g_fullCallDispatch) [[unlikely]]
         return runtime.dispatchGuestBranch(rdram, ctx, targetPc, sourcePc, fallthroughPc, kind,
                                            kind == PS2Runtime::GuestBranchKind::IndirectCall ? "JALR" : "JAL");
@@ -3299,7 +3433,6 @@ void PS2Runtime::run()
         gameThreadFinished.store(true, std::memory_order_release); });
 
     ThreadPriority::RaiseCurrentThread(ThreadPriority::Level::AboveNormal);
-    bool restoreMaximized = false;
     uint64_t tick = 0;
     std::ofstream frameTimes;
     // With PCSX2's GS the presents happen on the GS thread: GSPcsx2Backend writes this file instead.
@@ -3560,45 +3693,14 @@ void PS2Runtime::run()
         const bool fullscreenAsked = ps2x::hotkeys::take(ps2x::hotkeys::Action::Fullscreen); // the F2 menu's button
         if (fullscreenKey || fullscreenAsked)
         {
-            ps2_host_input::releaseMouse();
-            const bool leavingFullscreen = IsWindowState(FLAG_BORDERLESS_WINDOWED_MODE);
-            if (!leavingFullscreen)
-                restoreMaximized = IsWindowMaximized();
-            ToggleBorderlessWindowed();
-            keepBorderlessBehind();
-            if (leavingFullscreen && restoreMaximized)
-                MaximizeWindow();
+            const int mode = ps2_host_display::toggleFullscreen();
             // The port keeps it as its Display Mode (saved like the OPTIONS screen's row).
             if (auto *listener = ps2_host_display::modeListener.load(std::memory_order_relaxed))
-                listener(!leavingFullscreen ? 2 : restoreMaximized ? 1 : 0);
+                listener(mode);
         }
         // The OPTIONS screen's Display Mode.
         if (const int mode = ps2_host_display::requestedMode.exchange(-1, std::memory_order_relaxed); mode >= 0)
-        {
-            ps2_host_input::releaseMouse();
-            const bool full = IsWindowState(FLAG_BORDERLESS_WINDOWED_MODE);
-            if (mode == 2)
-            {
-                if (!full)
-                {
-                    restoreMaximized = IsWindowMaximized();
-                    ToggleBorderlessWindowed();
-                    keepBorderlessBehind();
-                }
-            }
-            else
-            {
-                if (full)
-                    ToggleBorderlessWindowed();
-                if (mode == 1 && !IsWindowMaximized())
-                    MaximizeWindow();
-                else if (mode == 0 && IsWindowMaximized())
-                    RestoreWindow();
-                restoreMaximized = mode == 1;
-            }
-            ps2_host_display::startFullscreen = mode == 2;
-            ps2_host_display::startMaximized = mode == 1;
-        }
+            ps2_host_display::applyMode(mode);
         if (ps2_host_display::shapeRequested.exchange(false, std::memory_order_relaxed))
             shapeWindowToAspect();
 #endif

@@ -22,6 +22,7 @@
 // played at 30 merges each pair of samples (a button pressed in either counts, the sticks take the later), so no tap
 // is lost.
 #include "kamite/test_mode.h"
+#include "kamite/paths.h"
 #include "kamite/widescreen.h"
 #include "kamite/frame_patches.h"
 #include "kamite/debug_tools.h"
@@ -39,6 +40,7 @@
 #include "ps2_host_input.h"   // prompts::pinDevice
 
 #include <algorithm>
+#include <atomic>
 #include <cctype>
 #include <chrono>
 #include <cmath>
@@ -59,6 +61,8 @@ namespace kamite::test_mode
     {
         namespace fs = std::filesystem;
         namespace GameObj = game::GameObj;
+        // replayFrame(): the playing replay's test frame, kReplayIdle outside one (any thread).
+        std::atomic<uint32_t> g_replayFrame{0xFFFFFFFFu};
         namespace GameWork = game::GameWork;
 
         constexpr uint32_t kSample = 32u;                     // a DS2 status (the libpad layout) per game frame
@@ -112,7 +116,7 @@ namespace kamite::test_mode
                                                  "KAMITE_SPRINT_TRAVERSAL", "KAMITE_CHARACTER", "KAMITE_LIFT_CHAIRS",
                                                  "KAMITE_TENSION_PLACABLE", "KAMITE_OFF_THE_CUFF",
                                                  "KAMITE_BALL_BUSTER_WOMEN", "KAMITE_ROULETTE_CYCLE",
-                                                 "KAMITE_BUCK_BREAKER", "KAMITE_CASE_DEVICE"};
+                                                 "KAMITE_BUCK_BREAKER", "KAMITE_CASE_DEVICE", "KAMITE_HOLD_MODE"};
         // The game's own value of the gameplay settings above when nothing sets them (GHR.ini's defaults). A case
         // without one (the recorder's GHR.ini had no such line, or the option is newer than the case) ran with this
         // value, so its replay does too instead of taking the replaying machine's (Nov 6: T1's Elvis case replayed
@@ -130,7 +134,9 @@ namespace kamite::test_mode
             {"KAMITE_BUCK_BREAKER", "0"},
             // The device in effect (menus and HUD hints follow it; K, Nov 16). Older cases replayed as keyboard & mouse
             // whenever no controller was awake at the start, which is what their fingerprints hold (Nov 19).
-            {"KAMITE_CASE_DEVICE", "keys"}};
+            {"KAMITE_CASE_DEVICE", "keys"},
+            // Hold's mode (K, Nov 20): cases before it ran Hold to Brawl.
+            {"KAMITE_HOLD_MODE", "brawl"}};
         const char *caseDefault(const std::string &name)
         {
             for (const CaseDefault &d : kCaseDefaults)
@@ -1004,6 +1010,7 @@ namespace kamite::test_mode
         {
             Run &run = g_run;
             run.phase = Run::Phase::Done;
+            g_replayFrame.store(kReplayIdle, std::memory_order_relaxed);
             if (ok && run.record)
             {
                 if (run.polls < run.rec.polls())
@@ -1155,6 +1162,8 @@ namespace kamite::test_mode
                 run.readsLastFrame = run.readsThisFrame;
                 run.readsThisFrame = 0;
                 const uint8_t *sample = run.sampleUsed >= 0 ? run.rec.samples.data() + static_cast<size_t>(run.sampleUsed) * kSample : nullptr;
+                if (!run.record)
+                    g_replayFrame.store(run.frame, std::memory_order_relaxed);
                 logFrame(run.log, rdram, run.frame, run.divider, run.readsLastFrame, run.sampleUsed, sample);
                 writeRamFrame(run.ram, rdram, run.frame);
                 writeExtraFrame(run.extra, rdram, run.frame, run.extraRegions);
@@ -1442,7 +1451,7 @@ namespace kamite::test_mode
                 if (std::strcmp(name, "KAMITE_ASPECT") == 0)
                 {
                     char number[32];
-                    std::snprintf(number, sizeof(number), "%.6f", aspectRatio());
+                    std::snprintf(number, sizeof(number), "%.9g", static_cast<double>(aspectRatio())); // exact float
                     resolved = number;
                     value = resolved.c_str();
                 }
@@ -1453,6 +1462,8 @@ namespace kamite::test_mode
                     value = !modern::caseStyle().modern ? "classic" : modern::caseStyle().hold ? "hold" : "modern";
                 else if (std::strcmp(name, "KAMITE_MODERN_AUTO") == 0)
                     value = modern::caseStyle().autoOn ? "1" : "0";
+                else if (std::strcmp(name, "KAMITE_HOLD_MODE") == 0)
+                    value = modern::caseStyle().holdCam ? "cam" : "brawl";
                 if (value)
                     rec.settings += std::string("env.") + name + "=" + value + "\n";
             }
@@ -1510,7 +1521,11 @@ namespace kamite::test_mode
             // live log where a fix changed the game, and the report says so.
             {
                 std::error_code buildError;
-                const fs::path exe = g_exeDir / "GHR.exe";
+#if defined(_WIN32)
+                const fs::path exe = kamite::paths::programDir() / "GHR.exe";
+#else
+                const fs::path exe = kamite::paths::programDir() / "GHR";
+#endif
                 const auto size = fs::file_size(exe, buildError);
                 const auto time = fs::last_write_time(exe, buildError);
                 if (!buildError)
@@ -1713,9 +1728,24 @@ namespace kamite::test_mode
             const size_t equals = line.find('=');
             if (equals == std::string::npos)
                 continue;
-            const std::string name = line.substr(4, equals - 4), setting = trim(line.substr(equals + 1));
+            const std::string name = line.substr(4, equals - 4);
+            std::string setting = trim(line.substr(equals + 1));
             if (std::find(std::begin(kCaseSettings), std::end(kCaseSettings), name) == std::end(kCaseSettings))
                 continue; // only the settings a case may carry
+            // An older case kept the aspect as written ("16:9"), which the game snaps to the primary screen's own
+            // shape when within 3%: the replay then depended on the replaying machine's monitor (and its DPI scaling:
+            // 1.77813 on K's 2560x1440, 1.77778 on his 3440x1440, Nov 20). Pinned to the ratio's exact float, what an
+            // unsnapped "16:9" gives (widescreen.cpp parseAspect).
+            if (name == "KAMITE_ASPECT")
+            {
+                float w = 0.0f, h = 0.0f;
+                if (std::sscanf(setting.c_str(), "%f:%f", &w, &h) == 2 && w > 0.0f && h > 0.0f)
+                {
+                    char number[32];
+                    std::snprintf(number, sizeof(number), "%.9g", static_cast<double>(w / h));
+                    setting = number;
+                }
+            }
 #if defined(_WIN32)
             _putenv_s(name.c_str(), setting.c_str());
 #else
@@ -1816,6 +1846,11 @@ namespace kamite::test_mode
     bool failed()
     {
         return g_run.failed;
+    }
+
+    uint32_t replayFrame()
+    {
+        return g_replayFrame.load(std::memory_order_relaxed);
     }
 
     bool recording()
