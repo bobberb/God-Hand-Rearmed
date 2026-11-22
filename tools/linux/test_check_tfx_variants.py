@@ -751,6 +751,9 @@ class Report(unittest.TestCase):
     def test_line_numbers_also_as_tfx_lines(self):
         self.assertEqual(ctv.tfx_lines("source:120: error: 'bad' : undeclared\n", 70),
                          "source:120 (tfx.glsl:50): error: 'bad' : undeclared\n")
+        self.assertEqual(ctv.tfx_lines("source:3: error: x\nsource:70: error: y\nsource:71: error: z\n", 70),
+                         "source:3 (header): error: x\nsource:70 (header): error: y\n"
+                         "source:71 (tfx.glsl:1): error: z\n")
 
     @unittest.skipUnless(SH, "needs sh")
     def test_failing_variants_named_and_exit_1(self):

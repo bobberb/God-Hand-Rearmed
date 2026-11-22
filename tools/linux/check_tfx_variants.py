@@ -1361,9 +1361,12 @@ def probe(compiler: list[str], modes: tuple[bool, ...] = (False,)) -> str | None
 
 
 def tfx_lines(message: str, header_lines: int) -> str:
-    """`source:123:` (a line of the assembled source) also as the tfx.glsl line."""
-    return re.sub(r"\bsource:(\d+):", lambda m: f"source:{m.group(1)} (tfx.glsl:{int(m.group(1)) - header_lines}):",
-                  message)
+    """`source:123:` (a line of the assembled source) also as the tfx.glsl line, or as the header GSDeviceVK.cpp
+    writes before it (AddShaderHeader, the stage line, the AddMacro lines)."""
+    def where(m):
+        n = int(m.group(1))
+        return f"source:{n} ({f'tfx.glsl:{n - header_lines}' if n > header_lines else 'header'}):"
+    return re.sub(r"\bsource:(\d+):", where, message)
 
 
 def main(argv: list[str] | None = None) -> int:
