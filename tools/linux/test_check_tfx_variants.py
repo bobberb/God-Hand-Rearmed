@@ -1,7 +1,7 @@
 """Gate tests of check_tfx_variants.py's pure parts: reading GSDeviceVK.cpp / GSDevice.h / tfx.glsl, the value
 classes, the covering array, the source assembly, the report. No shader compiler: a shell one-liner stands in.
 
-    python -I -m unittest discover -s tools/linux -p "test_*.py" -v
+    python3 -m unittest discover -s tools/linux -p 'test_*.py'      (from the repository root; -I and -v work too)
 """
 import contextlib
 import dataclasses
@@ -832,6 +832,12 @@ class Tidy(unittest.TestCase):
             for name, fn in real.items():
                 setattr(ctv, name, fn)
         self.assertEqual(calls, {"parse_stages": 1, "parse_stage_macros": 1})
+
+    def test_documented_test_command(self):
+        # The form a reader copies; the packaging-tests check runs the same discovery with -I -v.
+        self.assertIn("python3 -m unittest discover -s tools/linux -p 'test_*.py'", __doc__)
+        flake = (ROOT / "flake.nix").read_text()
+        self.assertIn('python3 -I -m unittest discover -s tools/linux -p "test_*.py" -v', flake)
 
     def test_tfxcc_says_it_does_both_paths(self):
         head = (HERE / "tfxcc" / "tfxcc.c").read_text().split("*/")[0]
