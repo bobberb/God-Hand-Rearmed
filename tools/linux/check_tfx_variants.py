@@ -17,13 +17,20 @@ Everything is read from the sources, nothing is listed by hand:
     compiled. A macro compared with another macro keeps all its values; one used as a number in code also keeps its
     largest.
 
-Coverage rule, per stage (vert, frag), over the parameters (selector macros and device features): every value class
-of every parameter, every pair of classes of every two parameters, and every triple of classes of every three
-parameters that one block of tfx.glsl is conditioned on (its #if / #elif and all those around it, with the shader's
-own #defines like SW_BLEND or ZWRITE and the header's like DISABLE_TEXTURE_BARRIER expanded to what they read)
-appears in at least one variant: a greedy covering array, deterministic. Combinations no game build can contain are left out by CONSTRAINTS below, each citing the game code
-that rules it out; one the greedy fill could not place in any variant is an error. Variants whose assembled source
-is the same text are compiled once.
+Coverage rule, per stage (vert, frag), over the parameters (selector macros and device features):
+  - every value class of every parameter, and every pair of classes of every two parameters;
+  - every triple of classes of every three parameters one block of tfx.glsl is conditioned on (its #if / #elif and
+    all those around it, with the shader's own #defines like SW_BLEND or ZWRITE and the header's like
+    DISABLE_TEXTURE_BARRIER expanded to what they read);
+  - for every use of a name tfx.glsl declares under a condition (a variable, a function, a #define) where none of its
+    declarations is sure to be compiled with it: a variant compiling the use and none of the declarations, if the
+    constraints allow one. A depth-first search over the #if conditions (evaluated, three-valued) finds it or proves
+    there is none; a search past its budget is an error. Declarations are read by type keyword (GLSL_TYPES), one per
+    match, with no scopes: a name declared again in another function counts as declared, so a variant may be added
+    that compiles fine (the compiler is the judge), and a declaration this misses is a name it never checks.
+All of it in a greedy covering array, deterministic. Combinations no game build can contain are left out by
+CONSTRAINTS below, each citing the game code that rules it out; one the greedy fill could not place in any variant is
+an error. Variants whose assembled source is the same text are compiled once.
 
 Exit 0 when every variant compiles, 1 naming each failing variant (stage, non-zero macros, features) with the
 compiler's messages, their line numbers also given as tfx.glsl lines; 2 for a problem reading the sources.
@@ -537,6 +544,10 @@ class Stage:
     params: list[Param]
     constraints: list[Constraint]
     groups: list[tuple[str, ...]]
+    # Uses of a name compiled without its declaration: (name, tfx.glsl line, the parameter values doing it); and the
+    # ones whose search gave up.
+    missing: list[tuple[str, int, dict]] = dataclasses.field(default_factory=list)
+    gave_up: list[tuple[str, int]] = dataclasses.field(default_factory=list)
 
 
 @dataclasses.dataclass
@@ -569,6 +580,7 @@ def load(root: Path = ROOT, tfx_path: Path | None = None) -> Sources:
     device_h = (root / DEVICE_H).read_text()
     tfx = (tfx_path or root / TFX).read_text()
     stages = []
+    stage_lines = parse_stage_macros(cpp)
     for recipe in parse_stages(cpp):
         fields = parse_selector(device_h, recipe.selector, enums)
         feature_names = set(header_features) | {m.feature for m in recipe.macros if m.feature}
@@ -591,7 +603,18 @@ def load(root: Path = ROOT, tfx_path: Path | None = None) -> Sources:
         for c in constraints:
             if not set(c.params) <= names:
                 raise SourceError(f"constraint on {c.params} names something {recipe.stage} no longer has")
-        stages.append(Stage(recipe, params, constraints, interaction_groups(tfx, header, names)))
+        stage = Stage(recipe, params, constraints, interaction_groups(tfx, header, names))
+        own = re.fullmatch(r"#define (\w+) .*\n", recipe.stage_line).group(1)
+        others = {re.fullmatch(r"#define (\w+) .*\n", line).group(1) for line in stage_lines.values()} - {own}
+        cond = Conditions(tfx, header, own, others, names)
+        allowed = checker(params, constraints)
+        for name, line, use, decls in use_without_declaration(cond):
+            env, finished = find_missing_declaration(cond, use, decls, params, constraints, allowed)
+            if env:
+                stage.missing.append((name, line, env))
+            elif not finished:
+                stage.gave_up.append((name, line))
+        stages.append(stage)
     return Sources(header, macro_format, stages, tfx)
 
 
@@ -657,14 +680,325 @@ def interaction_groups(glsl: str, header: list[HeaderLine], names: set[str]) -> 
     return sorted(groups)
 
 
-def covering(params: list[Param], groups: list[tuple[str, ...]], constraints: list[Constraint]
-             ) -> tuple[list[dict[str, int]], list[tuple], list[tuple]]:
-    """Rows (param -> value) holding every value of every param, every pair of values of every two params, and every
-    triple of values of every three params in one group; and the tuples left out, those a constraint forbids and those
-    the greedy fill could not complete into an allowed row. Greedy and deterministic: a row starts from the first uncovered tuple (triples first) and fills the
-    other params, largest domains first, with the value completing the most uncovered tuples (ties: the smaller)."""
-    names = [p.name for p in params]
-    index = {n: i for i, n in enumerate(names)}
+# ---------------------------------------------------------------------------------------------------------------------
+# Which code a variant compiles: tfx.glsl's #if expressions evaluated, three-valued (None: depends on a parameter not
+# chosen yet), so a search can find a variant that compiles a use of a name without any of its declarations.
+
+GLSL_TYPES = ("void bool int uint float double vec2 vec3 vec4 ivec2 ivec3 ivec4 uvec2 uvec3 uvec4 bvec2 bvec3 bvec4 "
+              "mat2 mat3 mat4 sampler2D texture2D image2D subpassInput").split()
+DECLARATION = re.compile(r"\b(?:" + "|".join(GLSL_TYPES) + r")\s+([A-Za-z_]\w*)")
+PRECEDENCE = [("||",), ("&&",), ("|",), ("^",), ("&",), ("==", "!="), ("<", "<=", ">", ">="), ("<<", ">>"),
+              ("+", "-"), ("*", "/", "%")]
+
+
+def parse_condition(tokens: list[str], where: str):
+    """A preprocessor expression as a tree: ("num", n), ("id", name), ("defined", name), ("un", op, x),
+    ("bin", op, x, y)."""
+    pos = 0
+
+    def peek():
+        return tokens[pos] if pos < len(tokens) else None
+
+    def take(want=None):
+        nonlocal pos
+        t = peek()
+        if t is None or want is not None and t != want:
+            raise SourceError(f"{where}: cannot read the condition {' '.join(tokens)!r}")
+        pos += 1
+        return t
+
+    def unary():
+        t = take()
+        if t in ("!", "~", "-", "+"):
+            return ("un", t, unary())
+        if t == "(":
+            x = binary(0)
+            take(")")
+            return x
+        if t == "defined":
+            if peek() == "(":
+                take("(")
+                name = take()
+                take(")")
+            else:
+                name = take()
+            return ("defined", name)
+        if INT.fullmatch(t):
+            return ("num", int_literal(t))
+        if re.fullmatch(r"[A-Za-z_]\w*", t) and peek() != "(":
+            return ("id", t)
+        raise SourceError(f"{where}: cannot read the condition {' '.join(tokens)!r}")
+
+    def binary(level):
+        if level == len(PRECEDENCE):
+            return unary()
+        x = binary(level + 1)
+        while peek() in PRECEDENCE[level]:
+            op = take()
+            x = ("bin", op, x, binary(level + 1))
+        return x
+
+    tree = binary(0)
+    if pos != len(tokens):
+        raise SourceError(f"{where}: cannot read the condition {' '.join(tokens)!r}")
+    return tree
+
+
+ARITH = {"|": lambda a, b: a | b, "^": lambda a, b: a ^ b, "&": lambda a, b: a & b, "==": lambda a, b: int(a == b),
+         "!=": lambda a, b: int(a != b), "<": lambda a, b: int(a < b), "<=": lambda a, b: int(a <= b),
+         ">": lambda a, b: int(a > b), ">=": lambda a, b: int(a >= b), "<<": lambda a, b: a << b,
+         ">>": lambda a, b: a >> b, "+": lambda a, b: a + b, "-": lambda a, b: a - b, "*": lambda a, b: a * b,
+         "/": lambda a, b: int(a / b) if b else None, "%": lambda a, b: a % b if b else None}
+
+
+class Conditions:
+    """tfx.glsl's #if / #elif / #else structure for one stage: each line's stack of block conditions, resolved once
+    (the shader's own macros inlined, the header's as guards over device features, anything else a number), and a
+    three-valued evaluator of them: 1, 0, or None while it depends on parameters not set yet."""
+
+    def __init__(self, glsl: str, header: list[HeaderLine], stage_macro: str, other_stage_macros: set[str],
+                 names: set[str]):
+        self.names = names
+        self.stage_macro, self.other_stage_macros = stage_macro, other_stage_macros
+        text = strip_c_comments(glsl)
+        self.defines: dict[str, set[str]] = {}
+        for m in re.finditer(r"^\s*#\s*define\s+([A-Za-z_]\w*)(\(?)[ \t]*(.*?)\s*$", text, re.M):
+            self.defines.setdefault(m.group(1), set()).add("(" if m.group(2) else m.group(3))
+        self.header: dict[str, tuple] = {}  # macro -> ("guard", code, features) / ("num", 1)
+        for h in header:
+            m = re.fullmatch(r"#define (\w+).*\n", h.text)
+            if m:
+                self.header[m.group(1)] = (("guard", compile(h.guard.strip(), "guard", "eval"),
+                                            tuple(sorted(set(re.findall(r'F\["([\w.]+)"\]', h.guard)))))
+                                           if h.guard else ("num", 1))
+        self._bodies: dict[str, tuple] = {}
+        self._reads: dict[int, frozenset] = {}
+        self.lines: list[tuple[int, tuple, str]] = []  # (line number, condition stack, line)
+        stack: list[tuple[tuple, list]] = []  # (this branch's condition, the conditions before it in its chain)
+        for n, line in enumerate(text.splitlines(), 1):
+            toks = TOKEN.findall(line)
+            where = f"tfx.glsl:{n}"
+            if toks[:1] == ["#"] and len(toks) > 1 and toks[1] in ("if", "ifdef", "ifndef", "elif", "else", "endif"):
+                d = toks[1]
+                if d in ("if", "ifdef", "ifndef"):
+                    cond = (self.resolve(parse_condition(toks[2:], where)) if d == "if" else
+                            self.resolve(("defined", toks[2])) if d == "ifdef" else
+                            ("un", "!", self.resolve(("defined", toks[2]))))
+                    stack.append((cond, [cond]))
+                elif not stack:
+                    raise SourceError(f"{where}: #{d} without #if")
+                elif d == "endif":
+                    stack.pop()
+                else:
+                    before = stack[-1][1]
+                    none_before = before[0]
+                    for c in before[1:]:
+                        none_before = ("bin", "||", none_before, c)
+                    none_before = ("un", "!", none_before)
+                    if d == "elif":
+                        cond = self.resolve(parse_condition(toks[2:], where))
+                        stack[-1] = (("bin", "&&", none_before, cond), before + [cond])
+                    else:
+                        stack[-1] = (none_before, before)
+                continue
+            self.lines.append((n, tuple(c for c, _ in stack), line))
+        if stack:
+            raise SourceError("tfx.glsl: #if without #endif")
+
+    def resolve(self, node, seen: frozenset = frozenset()) -> tuple:
+        """`node` with every name replaced: a parameter stays ("id", name); a shader macro becomes its body, a header
+        macro its guard, the stage's macro 1, anything else 0 (as the preprocessor reads an unknown name)."""
+        kind = node[0]
+        if kind == "num":
+            return node
+        if kind == "defined":
+            name = node[1]
+            if name in self.names:
+                return ("id", name) if name.startswith("features.") else ("num", 1)
+            if name in self.header:
+                return self.header[name]
+            return ("num", int(name == self.stage_macro))
+        if kind == "id":
+            name = node[1]
+            if name in self.names:
+                return node
+            if name in self.header:
+                return self.header[name]
+            if name == self.stage_macro:
+                return ("num", 1)
+            if name in self.defines and name not in seen and name not in self.other_stage_macros:
+                if name not in self._bodies:
+                    bodies = self.defines[name]
+                    if len(bodies) != 1 or "(" in bodies:
+                        raise SourceError(f"tfx.glsl: {name} is used in a condition but has {len(bodies)} "
+                                          f"definitions or takes arguments; teach {Path(__file__).name}")
+                    tree = parse_condition(TOKEN.findall(next(iter(bodies))), f"tfx.glsl: #define {name}")
+                    self._bodies[name] = self.resolve(tree, seen | {name})
+                return self._bodies[name]
+            return ("num", 0)
+        return (kind, node[1], *(self.resolve(x, seen) for x in node[2:]))
+
+    def value(self, node, env: dict, memo: dict):
+        """The integer `node` is with the parameters in env, None if that depends on others. memo: {} per env."""
+        key = id(node)
+        if key in memo:
+            return memo[key]
+        kind = node[0]
+        if kind == "num":
+            out = node[1]
+        elif kind == "id":
+            out = env.get(node[1])
+        elif kind == "guard":
+            out = (None if any(f not in env for f in node[2]) else
+                   int(bool(eval(node[1], {"__builtins__": {}}, {"F": env}))))
+        elif kind == "un":
+            x = self.value(node[2], env, memo)
+            out = None if x is None else {"!": int(not x), "~": ~x, "-": -x, "+": x}[node[1]]
+        else:
+            op, a = node[1], self.value(node[2], env, memo)
+            if op == "&&":
+                b = 0 if a == 0 else self.value(node[3], env, memo)
+                out = 0 if a == 0 or b == 0 else None if a is None or b is None else 1
+            elif op == "||":
+                b = 1 if a not in (0, None) else self.value(node[3], env, memo)
+                out = 1 if a not in (0, None) or b not in (0, None) else None if a is None or b is None else 0
+            else:
+                b = self.value(node[3], env, memo)
+                out = None if a is None or b is None else ARITH[node[1]](a, b)
+        memo[key] = out
+        return out
+
+    def reads(self, node) -> frozenset:
+        """The parameters `node` can depend on."""
+        key = id(node)
+        if key not in self._reads:
+            kind = node[0]
+            self._reads[key] = (frozenset() if kind == "num" else frozenset({node[1]}) if kind == "id" else
+                                frozenset(node[2]) if kind == "guard" else
+                                frozenset().union(*(self.reads(x) for x in node[2:])))
+        return self._reads[key]
+
+    def open_reads(self, node, env: dict, memo: dict) -> set[str]:
+        """The unset parameters that can still change `node`: those of its undecided parts only."""
+        if self.value(node, env, memo) is not None:
+            return set()
+        if node[0] in ("id", "guard"):
+            return set(self.reads(node)) - env.keys()
+        return set().union(*(self.open_reads(x, env, memo) for x in node[2:]))
+
+    def stack_value(self, stack: tuple, env: dict, memo: dict | None = None):
+        """1 if every block in the stack is compiled, 0 if one is not, None if that depends on unset parameters."""
+        memo = {} if memo is None else memo
+        out = 1
+        for cond in stack:
+            v = self.value(cond, env, memo)
+            if v == 0:
+                return 0
+            if v is None:
+                out = None
+        return out
+
+
+def use_without_declaration(cond: Conditions) -> list[tuple[str, int, tuple, list[tuple]]]:
+    """(name, line, use stack, declaration stacks) for each use of a name tfx.glsl declares (a variable, a function or
+    a #define) where no declaration is sure to be compiled with the use: none of the declarations' stacks is a prefix
+    of the use's. Lines this stage never compiles are left out."""
+    live = [(n, stack, line) for n, stack, line in cond.lines if cond.stack_value(stack, {}) != 0]
+    decls: dict[str, set[tuple]] = {}
+    for n, stack, line in live:
+        m = re.match(r"\s*#\s*define\s+([A-Za-z_]\w*)", line)
+        found = [m.group(1)] if m else [] if line.lstrip().startswith("#") else DECLARATION.findall(line)
+        for name in found:
+            if name not in cond.names:
+                decls.setdefault(name, set()).add(stack)
+    out, seen = [], set()
+    for n, stack, line in live:
+        if line.lstrip().startswith("#"):
+            continue
+        declared_here = set(DECLARATION.findall(line))
+        for name in re.findall(r"(?<![.\w])([A-Za-z_]\w*)", line):
+            if name not in decls or name in declared_here or (name, stack) in seen:
+                continue
+            seen.add((name, stack))
+            if not any(stack[:len(d)] == d for d in decls[name]):
+                out.append((name, n, stack, sorted(decls[name], key=len)))
+    return out
+
+
+def find_missing_declaration(cond: Conditions, use: tuple, decls: list[tuple], params: list[Param],
+                             constraints: list[Constraint], allowed: Callable[[dict, str], bool],
+                             budget: int = 20000) -> tuple[dict | None, bool]:
+    """Parameter values (only those the conditions read) under which every block of the use compiles and every
+    declaration has a block that does not, allowed by the constraints, or None; and whether the search finished
+    (False: it ran past its budget, so None proves nothing).
+
+    Depth first over the parameters the declarations read (those the use reads too first). The parameters only the use
+    reads, outside every constraint, cannot change a declaration: they are searched last, once per way of ruling all
+    the declarations out, for any values compiling the use."""
+    frames = sorted({c for s in [use, *decls] for c in s}, key=repr)
+    reads = {c: cond.reads(c) for c in frames}
+    use_reads = set().union(set(), *(reads[c] for c in use))
+    decl_reads = set().union(set(), *(reads[c] for d in decls for c in d))
+    tied = {n for c in constraints for n in c.params}
+    use_only = use_reads - decl_reads - tied
+    by_name = {p.name: p for p in params}
+    steps = 0
+
+    def branch(env, name, then):
+        for v in by_name[name].values:
+            env[name] = v
+            if allowed(env, name):
+                got = then(env)
+                if got is not None:
+                    return got
+            del env[name]
+        return None
+
+    def compile_use(env):
+        """Values of the use-only parameters compiling every block of the use."""
+        nonlocal steps
+        steps += 1
+        if steps > budget:
+            return None
+        memo: dict = {}
+        u = [cond.value(c, env, memo) for c in use]
+        if 0 in u:
+            return None
+        if all(v == 1 for v in u):
+            return dict(env)
+        open_reads = sorted(set().union(*(cond.open_reads(c, env, memo) for c, v in zip(use, u) if v is None)))
+        return branch(env, open_reads[0], compile_use) if open_reads else None
+
+    def rule_out(env):
+        nonlocal steps
+        steps += 1
+        if steps > budget:
+            return None
+        memo: dict = {}
+        known = {c: cond.value(c, env, memo) for c in frames}
+        if any(known[c] == 0 for c in use):
+            return None
+        open_decls = [d for d in decls if all(known[c] != 0 for c in d)]
+        if any(all(known[c] == 1 for c in d) for d in open_decls):
+            return None
+        if not open_decls:
+            return compile_use(env)
+        # The use's own tests first (they usually settle the declarations), then the most-read parameter.
+        votes: dict[str, int] = {}
+        for c in [c for c in use if known[c] is None] + [c for d in open_decls for c in d if known[c] is None]:
+            for n in cond.open_reads(c, env, memo) - use_only:
+                votes[n] = votes.get(n, 0) + (1000 if c in use else 1)
+        if not votes:
+            return None
+        return branch(env, min(votes, key=lambda n: (-votes[n], n)), rule_out)
+
+    got = rule_out({})
+    return got, steps <= budget
+
+
+def checker(params: list[Param], constraints: list[Constraint]) -> Callable[[dict, str], bool]:
+    """allowed(row, changed): no constraint on `changed` is broken by `row`, whatever its params not in the row
+    become."""
     values = {p.name: p.values for p in params}
     watch: dict[str, list[Constraint]] = {}
     for c in constraints:
@@ -672,18 +1006,34 @@ def covering(params: list[Param], groups: list[tuple[str, ...]], constraints: li
             watch.setdefault(n, []).append(c)
 
     def allowed(row: dict, changed: str) -> bool:
-        """No constraint on `changed` is broken by `row`, whatever its params not yet in the row become."""
         for c in watch.get(changed, ()):
             free = [n for n in c.params if n not in row]
             if not any(c.ok({**row, **dict(zip(free, vs))}) for vs in itertools.product(*(values[n] for n in free))):
                 return False
         return True
+    return allowed
+
+
+def covering(params: list[Param], groups: list[tuple[str, ...]], constraints: list[Constraint],
+             extra: list[dict] = ()) -> tuple[list[dict[str, int]], list[tuple], list[tuple]]:
+    """Rows (param -> value) holding every value of every param, every pair of values of every two params, and every
+    triple of values of every three params in one group; and the tuples left out, those a constraint forbids and those
+    the greedy fill could not complete into an allowed row. Greedy and deterministic: a row starts from the first uncovered tuple (triples first) and fills the
+    other params, largest domains first, with the value completing the most uncovered tuples (ties: the smaller)."""
+    names = [p.name for p in params]
+    index = {n: i for i, n in enumerate(names)}
+    values = {p.name: p.values for p in params}
+    allowed = checker(params, constraints)
 
     combos = {(n,) for n in names} | set(itertools.combinations(names, 2))
     for g in groups:
         combos |= set(itertools.combinations(sorted(g, key=index.get), 3))
-    seeds = sorted(((c, v) for c in combos for v in itertools.product(*(values[n] for n in c))),
-                   key=lambda t: (-len(t[0]), [index[n] for n in t[0]], t[1]))
+    wanted = {(c, v) for c in combos for v in itertools.product(*(values[n] for n in c))}
+    for env in extra:  # given assignments of any number of params, each to be held by a row
+        combo = tuple(sorted(env, key=index.get))
+        combos.add(combo)
+        wanted.add((combo, tuple(env[n] for n in combo)))
+    seeds = sorted(wanted, key=lambda t: (-len(t[0]), [index[n] for n in t[0]], t[1]))
     uncovered = set(seeds)
     open_vals = {c: set() for c in combos}  # the value tuples of each combo no row holds yet
     for c, vals in seeds:
@@ -751,7 +1101,8 @@ def variants(src: Sources) -> tuple[list[Variant], dict[str, Stats]]:
     """Every stage's variants (one per distinct source), and per stage how they were made."""
     out, stats = [], {}
     for stage in src.stages:
-        rows, ruled_out, unplaced = covering(stage.params, stage.groups, stage.constraints)
+        rows, ruled_out, unplaced = covering(stage.params, stage.groups, stage.constraints,
+                                             [env for _, _, env in stage.missing])
         seen, dupes = set(), 0
         for row in rows:
             text, hdr = assemble(src, stage, row)
@@ -813,6 +1164,12 @@ def main(argv: list[str] | None = None) -> int:
     args.jobs = args.jobs if args.jobs > 0 else os.cpu_count() or 4
 
     start = time.monotonic()
+    compiler = shlex.split(args.compiler)
+    if not args.list:  # before the minutes of work, the seconds that make them mean something
+        problem = probe(compiler)
+        if problem:
+            print(f"check_tfx_variants: {problem}", file=sys.stderr)
+            return 2
     try:
         src = load(args.root, args.tfx)
         for c in CONSTRAINTS:
@@ -840,11 +1197,6 @@ def main(argv: list[str] | None = None) -> int:
     if args.list:
         return 0
 
-    compiler = shlex.split(args.compiler)
-    problem = probe(compiler)
-    if problem:
-        print(f"check_tfx_variants: {problem}", file=sys.stderr)
-        return 2
     failed = []
     with concurrent.futures.ThreadPoolExecutor(args.jobs) as pool:
         for v, rc, msg in pool.map(lambda v: compile_one(compiler, v), vs):
@@ -858,14 +1210,19 @@ def main(argv: list[str] | None = None) -> int:
     for name, (combo, vals) in unplaced:
         print(f"UNPLACED {name}: no variant holds {' '.join(f'{n}={v}' for n, v in zip(combo, vals))}; "
               f"a constraint missing from {Path(__file__).name}, or the fill needs to backtrack")
+    gave_up = [(st.recipe.stage, name, line) for st in src.stages for name, line in st.gave_up]
+    for stage, name, line in gave_up:
+        print(f"GAVE UP {stage}: could not tell whether {name} at tfx.glsl:{line} can be compiled without its "
+              f"declaration; raise the search budget in {Path(__file__).name} or simplify the conditions")
     per_stage = ", ".join(f"{name} {sum(v.stage == name for v in vs)}" for name in stats)
     print(f"tfx variants: {len(vs)} ({per_stage}), {len(failed)} failed; every pair of "
           f"{' / '.join(f'{len(st.params)} {st.recipe.stage}' for st in src.stages)} parameters and every triple in "
           f"{sum(len(st.groups) for st in src.stages)} #if groups, "
+          f"{sum(len(st.missing) for st in src.stages)} uses without their declaration held, "
           f"{sum(len(st.ruled_out) for st in stats.values())} combinations ruled out by {len(CONSTRAINTS)} constraints")
     # Last, and the only line that differs between runs of the same sources (the Nix check keeps it out of $out).
     print(f"time: {args.jobs} jobs, {time.monotonic() - start:.1f}s")
-    return 1 if failed or unplaced else 0
+    return 1 if failed or unplaced or gave_up else 0
 
 
 if __name__ == "__main__":

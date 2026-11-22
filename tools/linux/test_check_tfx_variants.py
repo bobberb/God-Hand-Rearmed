@@ -20,6 +20,28 @@ sys.path.insert(0, str(HERE))
 import check_tfx_variants as ctv  # noqa: E402
 
 ROOT = ctv.ROOT
+
+
+def _memo_load(load=ctv.load, cache={}):
+    """ctv.load once per distinct input (the shader's text, the root): several tests, main() among them, read the
+    same sources, and a load runs the declaration searches. Tests never change what it returns."""
+    def cached(root=ROOT, tfx_path=None):
+        key = (str(root), (tfx_path or Path(root) / ctv.TFX).read_text())
+        if key not in cache:
+            cache[key] = load(root, tfx_path)
+        return cache[key]
+    return cached
+
+
+def _memo_variants(variants=ctv.variants, cache={}):
+    def cached(src):
+        if id(src) not in cache:
+            cache[id(src)] = (src, variants(src))
+        return cache[id(src)][1]
+    return cached
+
+
+ctv.load, ctv.variants = _memo_load(), _memo_variants()
 SH = shutil.which("sh")
 
 
@@ -337,6 +359,100 @@ using E = GSShader::E;
 struct S { union { struct { u32 a : 2; E e : 2; u8 b : 1; }; struct { u64 key; }; }; };
 """
         self.assertEqual(ctv.parse_selector(device_h, "S", {"E": [0, 1, 5]}), {"a": [0, 1, 2, 3], "e": [0, 1], "b": [0, 1]})
+
+
+class Declarations(unittest.TestCase):
+    PARAMS = [ctv.Param("A", (0, 1, 2)), ctv.Param("B", (0, 1)), ctv.Param("C", (0, 1, 2, 3)),
+              ctv.Param("features.x", (0, 1))]
+    NAMES = {p.name for p in PARAMS}
+    HEADER = [ctv.HeaderLine("#define NO_X 1\n", ' not F["features.x"] ')]
+
+    def cond(self, glsl):
+        return ctv.Conditions(glsl, self.HEADER, "FRAGMENT_SHADER", {"VERTEX_SHADER"}, self.NAMES)
+
+    def find(self, glsl, constraints=(), budget=20000):
+        cond = self.cond(glsl)
+        allowed = ctv.checker(self.PARAMS, list(constraints))
+        return [(name, line, ctv.find_missing_declaration(cond, use, decls, self.PARAMS, list(constraints), allowed,
+                                                          budget))
+                for name, line, use, decls in ctv.use_without_declaration(cond)]
+
+    def test_conditions_precedence_and_defined(self):
+        tree = ctv.parse_condition(ctv.TOKEN.findall("A == 1 || B && !defined(NO_X) && (C & 2) == 2"), "t")
+        cond = self.cond("")
+        tree = cond.resolve(tree)
+        self.assertEqual(cond.value(tree, {"A": 1}, {}), 1)
+        self.assertIsNone(cond.value(tree, {"A": 0, "B": 1}, {}))  # NO_X depends on features.x
+        self.assertEqual(cond.value(tree, {"A": 0, "B": 1, "features.x": 1, "C": 2}, {}), 1)
+        self.assertEqual(cond.value(tree, {"A": 0, "B": 1, "features.x": 0}, {}), 0)
+        self.assertEqual(cond.value(tree, {"A": 0, "B": 0}, {}), 0)
+        with self.assertRaises(ctv.SourceError):
+            ctv.parse_condition(ctv.TOKEN.findall("A == "), "t")
+        with self.assertRaises(ctv.SourceError):
+            ctv.parse_condition(ctv.TOKEN.findall("F(A)"), "t")
+
+    def test_elif_else_chains_and_stage_blocks(self):
+        cond = self.cond("#if A == 1\nfirst\n#elif B\nsecond\n#else\nthird\n#endif\n"
+                         "#if defined(VERTEX_SHADER)\nvert\n#endif\n#ifdef FRAGMENT_SHADER\nfrag\n#endif\n")
+        stacks = {line: stack for _, stack, line in cond.lines}
+        values = lambda line, env: cond.stack_value(stacks[line], env)  # noqa: E731
+        self.assertEqual([values(x, {"A": 1, "B": 1}) for x in ("first", "second", "third")], [1, 0, 0])
+        self.assertEqual([values(x, {"A": 0, "B": 1}) for x in ("first", "second", "third")], [0, 1, 0])
+        self.assertEqual([values(x, {"A": 2, "B": 0}) for x in ("first", "second", "third")], [0, 0, 1])
+        self.assertEqual((values("vert", {}), values("frag", {})), (0, 1))
+
+    def test_a_use_where_its_declaration_is_not_compiled(self):
+        glsl = ("#if A != 2\nfloat v = 0.0;\n#endif\n#if B && C == 3\nv += 1.0;\n#endif\n"
+                "#if A\nfloat w;\n#if B\nw = 1.0;\n#endif\n#endif\n")    # w: declared around its use, never missing
+        found = self.find(glsl)
+        self.assertEqual([(name, line) for name, line, _ in found], [("v", 5)])
+        env, finished = found[0][2]
+        self.assertTrue(finished)
+        self.assertEqual(env, {"A": 2, "B": 1, "C": 3})
+
+    def test_every_declaration_must_be_left_out(self):
+        glsl = ("#ifdef NO_X\nvec4 f() { return vec4(0); }\n#elif A == 1\nvec4 f() { return vec4(1); }\n#endif\n"
+                "#if B\nvec4 c = f();\n#endif\n")
+        (_, _, (env, finished)), = self.find(glsl)
+        self.assertTrue(finished)
+        self.assertEqual(env, {"features.x": 1, "A": 0, "B": 1})
+        # When the constraints say A is 1 whenever x is, f always exists: nothing to find, and that is a proof.
+        only = ctv.Constraint("frag", ("A", "features.x"), lambda v: not v["features.x"] or v["A"] == 1, "t", ())
+        (_, _, (env, finished)), = self.find(glsl, [only])
+        self.assertEqual((env, finished), (None, True))
+
+    def test_macro_declarations_count_and_a_tiny_budget_gives_up(self):
+        glsl = "#if A\n#define DISCARD discard\n#endif\n#if C\nDISCARD;\n#endif\n"
+        (name, _, (env, _)), = self.find(glsl)
+        self.assertEqual((name, env), ("DISCARD", {"A": 0, "C": 1}))
+        (_, _, (env, finished)), = self.find(glsl, budget=1)
+        self.assertEqual((env, finished), (None, False))
+
+    def test_critic_repros_get_a_variant(self):
+        base = (ROOT / ctv.TFX).read_text()
+        anchor = "#if PS_ZTST == ZTST_GEQUAL"
+        for decl, use, want in (
+                ("PS_TFX != 3", "PS_CHANNEL_FETCH == 5 && PS_BLEND_HW == 6 && PS_DITHER == 2",
+                 {"PS_TFX": 3, "PS_CHANNEL_FETCH": 5, "PS_BLEND_HW": 6, "PS_DITHER": 2}),
+                ("PS_AFAIL != 4", "PS_TFX == 2 && PS_ATST == 3 && PS_SCANMSK == 2",
+                 {"PS_AFAIL": 4, "PS_TFX": 2, "PS_ATST": 3, "PS_SCANMSK": 2})):
+            tfx = base.replace(anchor, f"#if {decl}\n\tfloat kamite_v = 0.0;\n#endif\n#if {use}\n"
+                                       f"\tkamite_v += 1.0;\n#endif\n{anchor}", 1)
+            with tempfile.TemporaryDirectory() as d:
+                (Path(d) / "tfx.glsl").write_text(tfx)
+                src = ctv.load(tfx_path=Path(d) / "tfx.glsl")
+            frag = src.stages[1]
+            self.assertIn(("kamite_v", want), [(n, env) for n, _, env in frag.missing])
+            vs, _ = ctv.variants(src)
+            self.assertTrue(any(all(v.values[k] == x for k, x in want.items()) for v in vs if v.stage == "frag"))
+
+    def test_real_shader_searches_all_finish(self):
+        src = ctv.load()
+        for stage in src.stages:
+            self.assertEqual(stage.gave_up, [], stage.recipe.stage)
+        # gl_FragDepth is a builtin its redeclaration only qualifies: writing it without one compiles, which the
+        # compiler confirms on the variant this adds.
+        self.assertEqual([n for n, _, _ in src.stages[1].missing], ["gl_FragDepth"])
 
 
 class Groups(unittest.TestCase):
