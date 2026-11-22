@@ -777,13 +777,19 @@ class Conditions:
         self.defines: dict[str, set[str]] = {}
         for m in re.finditer(r"^\s*#\s*define\s+([A-Za-z_]\w*)(\(?)[ \t]*(.*?)\s*$", text, re.M):
             self.defines.setdefault(m.group(1), set()).add("(" if m.group(2) else m.group(3))
-        self.header: dict[str, tuple] = {}  # macro -> ("guard", code, features) / ("num", 1)
+        # Header macros: name -> (as defined(name), as name): a feature guard over 1 and over the macro's value.
+        self.header: dict[str, tuple[tuple, tuple]] = {}
         for h in header:
-            m = re.fullmatch(r"#define (\w+).*\n", h.text)
+            m = re.fullmatch(r"#define (\w+)(?:[ \t]+(.*?))?\s*", h.text)
             if m:
-                self.header[m.group(1)] = (("guard", compile(h.guard.strip(), "guard", "eval"),
-                                            tuple(sorted(set(re.findall(r'F\["([\w.]+)"\]', h.guard)))))
-                                           if h.guard else ("num", 1))
+                value = (("num", int_literal(m.group(2))) if m.group(2) and INT.fullmatch(m.group(2)) else
+                         ("unreadable", m.group(1), m.group(2) or ""))
+                if not h.guard:
+                    self.header[m.group(1)] = (("num", 1), value)
+                    continue
+                guard = (compile(h.guard.strip(), "guard", "eval"),
+                         tuple(sorted(set(re.findall(r'F\["([\w.]+)"\]', h.guard)))))
+                self.header[m.group(1)] = (("guard", *guard, ("num", 1)), ("guard", *guard, value))
         self._bodies: dict[str, tuple] = {}
         self._reads: dict[int, frozenset] = {}
         self.lines: list[tuple[int, tuple, str]] = []  # (line number, condition stack, line)
@@ -829,7 +835,7 @@ class Conditions:
             if name in self.names or name in self.aliases:  # the game defines every AddMacro name
                 return ("num", 1)
             if name in self.header:
-                return self.header[name]
+                return self.header[name][0]
             return ("num", int(name == self.stage_macro))
         if kind == "id":
             name = node[1]
@@ -838,7 +844,11 @@ class Conditions:
             if name in self.aliases:
                 return ("id", self.aliases[name])
             if name in self.header:
-                return self.header[name]
+                value = self.header[name][1]
+                if value[0] == "unreadable" or value[0] == "guard" and value[3][0] == "unreadable":
+                    raise SourceError(f"tfx.glsl reads the header's {name} as a number, but the header defines it as "
+                                      f"{(value[2] if value[0] == 'unreadable' else value[3][2])!r}")
+                return value
             if name == self.stage_macro:
                 return ("num", 1)
             if name in self.defines and name not in seen and name not in self.other_stage_macros:
@@ -863,9 +873,9 @@ class Conditions:
             out = node[1]
         elif kind == "id":
             out = env.get(node[1])
-        elif kind == "guard":
+        elif kind == "guard":  # ("guard", code, features, value): value where the guard holds, else 0
             out = (None if any(f not in env for f in node[2]) else
-                   int(bool(eval(node[1], {"__builtins__": {}}, {"F": env}))))
+                   self.value(node[3], env, memo) if eval(node[1], {"__builtins__": {}}, {"F": env}) else 0)
         elif kind == "un":
             x = self.value(node[2], env, memo)
             out = None if x is None else {"!": int(not x), "~": ~x, "-": -x, "+": x}[node[1]]

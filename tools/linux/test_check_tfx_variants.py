@@ -415,6 +415,19 @@ class Declarations(unittest.TestCase):
         with self.assertRaises(ctv.SourceError):
             ctv.parse_condition(ctv.TOKEN.findall("F(A)"), "t")
 
+    def test_header_macros_read_as_their_value(self):
+        header = [ctv.HeaderLine("#define LEVEL 2\n", ' F["features.x"] '), ctv.HeaderLine("#define ALWAYS 3\n", None),
+                  ctv.HeaderLine("#define WORD abc\n", None)]
+        cond = ctv.Conditions("", header, "FRAGMENT_SHADER", set(), self.NAMES)
+        level = cond.resolve(ctv.parse_condition(ctv.TOKEN.findall("LEVEL == 2 && ALWAYS > 2"), "t"))
+        self.assertEqual(cond.value(level, {"features.x": 1}, {}), 1)
+        self.assertEqual(cond.value(level, {"features.x": 0}, {}), 0)
+        self.assertIsNone(cond.value(level, {}, {}))
+        both = cond.resolve(ctv.parse_condition(ctv.TOKEN.findall("defined(LEVEL) && defined(WORD)"), "t"))
+        self.assertEqual(cond.value(both, {"features.x": 1}, {}), 1)
+        with self.assertRaisesRegex(ctv.SourceError, "WORD"):
+            cond.resolve(("id", "WORD"))
+
     def test_elif_else_chains_and_stage_blocks(self):
         cond = self.cond("#if A == 1\nfirst\n#elif B\nsecond\n#else\nthird\n#endif\n"
                          "#if defined(VERTEX_SHADER)\nvert\n#endif\n#ifdef FRAGMENT_SHADER\nfrag\n#endif\n")
