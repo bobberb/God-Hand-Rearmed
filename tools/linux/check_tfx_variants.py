@@ -835,6 +835,7 @@ class Conditions:
                 self._event(m.group(1), "the header", guard, "define", m.group(2) or "")
         self._event(stage_macro, "the stage line", ("num", 1), "define", "1")
         self.lines: list[tuple[int, tuple, str]] = []  # (line number, condition stack, line)
+        self.directives: list[tuple[int, str]] = []  # (line number, "if" / "elif" / "else" / "endif")
         stack: list[tuple[tuple, list]] = []  # (this branch's condition, the conditions before it in its chain)
         for n, line in enumerate(text.splitlines(), 1):
             toks = TOKEN.findall(line)
@@ -844,6 +845,7 @@ class Conditions:
                                   f"one line per directive")
             if toks[:1] == ["#"] and len(toks) > 1 and toks[1] in ("if", "ifdef", "ifndef", "elif", "else", "endif"):
                 d = toks[1]
+                self.directives.append((n, "if" if d in ("ifdef", "ifndef") else d))
                 if d in ("if", "ifdef", "ifndef"):
                     cond = (self.resolve(parse_condition(toks[2:], where)) if d == "if" else
                             self.resolve(("defined", toks[2])) if d == "ifdef" else
@@ -1045,7 +1047,30 @@ def declarations_and_uses(cond: "Conditions") -> tuple[dict[str, list[tuple[str 
     decls: dict[str, list[tuple[str | None, tuple, tuple]]] = {}  # name -> (scope, stack, signature)
     uses = []
     depth, parens, function, pending = 0, 0, None, None
-    for n, stack, line in cond.lines:
+    # Each #if branch starts from the brace state before the #if; at #endif every branch (an #if without #else has
+    # an empty one) must end at the same depth, which then carries on. Braces opened per branch (one function head
+    # per branch) are fine; branches that end at different depths are not modelled.
+    branches: list[tuple[int, tuple, list, bool]] = []  # (line of #if, state before it, end states, #else seen)
+    items = sorted([(n, 0, ("line", stack, line)) for n, stack, line in cond.lines] +
+                   [(n, 1, ("dir", d)) for n, d in cond.directives])
+    for n, _, item in items:
+        if item[0] == "dir":
+            state = (depth, parens, function, pending)
+            if item[1] == "if":
+                branches.append((n, state, [], False))
+            elif item[1] in ("elif", "else"):
+                at, before, ends, has_else = branches[-1]
+                ends.append(state)
+                branches[-1] = (at, before, ends, has_else or item[1] == "else")
+                depth, parens, function, pending = before
+            else:
+                at, before, ends, has_else = branches.pop()
+                ends = ends + [state] + ([] if has_else else [before])
+                if len({(e[0], e[1]) for e in ends}) > 1:
+                    raise SourceError(f"tfx.glsl:{at}: the branches of this #if leave braces at different depths "
+                                      f"({sorted({e[0] for e in ends})}); {Path(__file__).name} does not model that")
+            continue
+        _, stack, line = item
         live = cond.stack_value(stack, {}) != 0
         m = re.match(r"\s*#\s*define\s+([A-Za-z_]\w*)(.*)", line)
         if m:

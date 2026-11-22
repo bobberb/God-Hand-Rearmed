@@ -626,6 +626,21 @@ class Declarations(unittest.TestCase):
                                 and v.values["PS_BLEND_HW"] == 6 and v.values["PS_DITHER"] == 2
                                 for v in vs if v.stage == "frag"), bad)
 
+    def test_braces_opened_per_branch(self):
+        for glsl in ("#if A == 1\nvec4 f(vec4 c) {\n#else\nvec4 f(vec4 c, float z) {\n#endif\nreturn c;\n}\n"
+                     "void main()\n{\n#if A != 2\n\tfloat v = 0.0;\n#endif\n#if B && C == 3\n\tv += 1.0;\n#endif\n}\n",
+                     "void main()\n{\n#if A == 1\nif (x > 0.5) {\n#elif B\nif (x > 0.2) {\n#else\nif (x > 0.1) {\n"
+                     "#endif\n\tx += 0.0;\n}\n#if A != 2\n\tfloat v = 0.0;\n#endif\n#if B && C == 3\n\tv += 1.0;\n"
+                     "#endif\n}\n"):
+            with self.subTest(glsl=glsl):
+                self.assertEqual(self.missing(glsl), ["v"])  # read through, still finds what it should
+
+    def test_branches_ending_at_different_depths_stop(self):
+        for glsl in ("void main()\n{\n#if A\nif (x) {\n#endif\n}\n",
+                     "void main()\n{\n#if A\nif (x) {\n#else\n#endif\n}\n"):
+            with self.subTest(glsl=glsl), self.assertRaisesRegex(ctv.SourceError, "different depths"):
+                self.find(glsl)
+
     def test_uses_through_define_bodies_follow_their_definition(self):
         glsl = ("#define USE (v + 1.0)\n"
                 "#if A == 1\n#define DROP { r = true; }\n#else\n#define DROP discard\n#endif\n"
