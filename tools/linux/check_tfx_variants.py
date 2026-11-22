@@ -102,6 +102,13 @@ CONSTRAINTS = [
                lambda v: v["PS_DATE"] not in (1, 2) or not v["PS_NO_COLOR"],
                "DATE 1 and 2 are the PrimID pass, which writes colour",
                ((DEVICE_CPP, r"pipe\.ps\.no_color = false;", 1),)),
+    Constraint("frag", ("PS_DATE", "PS_NO_COLOR1", "PS_BLEND_A", "PS_BLEND_B", "PS_BLEND_C", "PS_BLEND_D"),
+               lambda v: v["PS_DATE"] not in (1, 2) or (v["PS_NO_COLOR1"] and not (
+                   v["PS_BLEND_A"] or v["PS_BLEND_B"] or v["PS_BLEND_C"] or v["PS_BLEND_D"])),
+               "the PrimID pass (DATE 1 and 2) has no dual-source output and no shader blending",
+               ((DEVICE_CPP, r"^\tpipe\.ps\.no_color1 = true;", 1),
+                (DEVICE_CPP, r"pipe\.ps\.blend_a = pipe\.ps\.blend_b = pipe\.ps\.blend_c = pipe\.ps\.blend_d = false;",
+                 1))),
 ]
 
 

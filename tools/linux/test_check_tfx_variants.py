@@ -128,6 +128,13 @@ class RealSources(unittest.TestCase):
                                for vs in itertools.product(*(values[n] for n in free)))
                 self.assertTrue(any(forbids(c) for c in stage.constraints if set(c.params) & set(combo)), fixed)
 
+    def test_primid_pass_variants_as_gsdevicevk_builds_them(self):
+        primid = [v.values for v in self.vs if v.stage == "frag" and v.values["PS_DATE"] in (1, 2)]
+        self.assertTrue(primid)
+        for v in primid:
+            self.assertEqual((v["PS_NO_COLOR"], v["PS_NO_COLOR1"]), (0, 1))
+            self.assertEqual([v[f"PS_BLEND_{x}"] for x in "ABCD"], [0, 0, 0, 0])
+
     def test_both_values_of_see_through_are_compiled(self):
         seen = {v.values["PS_SEE_THROUGH"] for v in self.vs if v.stage == "frag"}
         self.assertEqual(seen, {0, 1})
