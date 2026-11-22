@@ -41,8 +41,9 @@ Coverage rule, per stage (vert, frag), over the parameters (selector macros and 
   Both searches are depth first over the #if conditions (evaluated, three-valued) and prove it when they find
   nothing; one past its budget is an error. Declarations are read by type (GLSL's, and the structs tfx.glsl
   declares), with declarator lists and `type[N]`. Not told apart: block scopes inside a function (a name declared
-  in an inner { } counts for the whole function), names made by token pasting or function-like macro arguments, and
-  interface-block instance names; a variant this adds for nothing compiles, one it misses is a gap.
+  in an inner { } counts for the whole function), struct and interface-block members (recorded as globals, so a
+  member counts as declaring a global of its name), names made by token pasting or function-like macro arguments,
+  and interface-block instance names; a variant this adds for nothing compiles, one it misses is a gap.
 All of it in a greedy covering array, deterministic. Combinations no game build can contain are left out by
 CONSTRAINTS below, each citing the game code that rules it out; one the greedy fill could not place in any variant is
 an error. Variants whose assembled source is the same text are compiled once.

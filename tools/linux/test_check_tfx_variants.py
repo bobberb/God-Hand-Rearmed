@@ -972,9 +972,13 @@ class Tidy(unittest.TestCase):
         building = ROOT / "docs/BUILDING.md"
         if not building.exists():  # the Nix checks' source set has no docs/
             self.skipTest("no docs/BUILDING.md in this tree")
-        row = next(x for x in building.read_text().splitlines() if x.startswith("| `tfx-variants`"))
-        self.assertIn("arithmetic over selectors in a `#if` keeps every value", row)
-        self.assertIn("what that model does not cover stops the check", row)
+        rows = [x for x in building.read_text().splitlines() if x.startswith("| `")]
+        row = next(x for x in rows if x.startswith("| `tfx-variants`"))
+        # A row like its neighbours, pointing at the docstring, which holds the rule and its limits.
+        self.assertLessEqual(len(row), max(len(x) for x in rows if x is not row) + 10)
+        self.assertIn("check_tfx_variants.py", row)
+        self.assertIn("docstring", row)
+        self.assertIn("struct and interface-block members (recorded as globals", doc)
 
     def test_tfxcc_says_it_does_both_paths(self):
         head = (HERE / "tfxcc" / "tfxcc.c").read_text().split("*/")[0]
