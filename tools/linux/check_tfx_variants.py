@@ -836,8 +836,9 @@ def main(argv: list[str] | None = None) -> int:
     print(f"tfx variants: {len(vs)} ({per_stage}), {len(failed)} failed; every pair of "
           f"{' / '.join(f'{len(st.params)} {st.recipe.stage}' for st in src.stages)} parameters and every triple in "
           f"{sum(len(st.groups) for st in src.stages)} #if groups, "
-          f"{sum(len(st.ruled_out) for st in stats.values())} combinations ruled out by {len(CONSTRAINTS)} constraints; "
-          f"{args.jobs} jobs, {time.monotonic() - start:.1f}s")
+          f"{sum(len(st.ruled_out) for st in stats.values())} combinations ruled out by {len(CONSTRAINTS)} constraints")
+    # Last, and the only line that differs between runs of the same sources (the Nix check keeps it out of $out).
+    print(f"time: {args.jobs} jobs, {time.monotonic() - start:.1f}s")
     return 1 if failed or unplaced else 0
 
 

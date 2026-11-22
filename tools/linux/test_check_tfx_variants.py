@@ -412,8 +412,26 @@ class Report(unittest.TestCase):
         want = [v for v in vs if v.values.get("PS_SEE_THROUGH")]
         self.assertEqual(len(fails), len(want))
         self.assertTrue(all(f.startswith("FAIL frag ") and "PS_SEE_THROUGH=1" in f for f in fails))
-        self.assertRegex(out.getvalue().splitlines()[-1],
+        self.assertRegex(out.getvalue().splitlines()[-2],
                          rf"^tfx variants: {len(vs)} \(vert \d+, frag \d+\), {len(want)} failed; ")
+
+    @unittest.skipUnless(SH, "needs sh")
+    def test_report_is_the_same_bytes_but_for_the_time_line(self):
+        runs = []
+        for jobs in ("1", "7"):
+            out = io.StringIO()
+            with contextlib.redirect_stdout(out):
+                ctv.main(["--compiler", f"{SH} -c 'cat > /dev/null' fake", "--jobs", jobs])
+            lines = out.getvalue().splitlines()
+            self.assertRegex(lines[-1], r"^time: \d+ jobs, [\d.]+s$")
+            self.assertFalse(any(line.startswith("time: ") for line in lines[:-1]))
+            runs.append(lines[:-1])
+        self.assertEqual(runs[0], runs[1])
+        flake = (ROOT / "flake.nix").read_text()
+        check = flake[flake.index('tfxVariants = pkgs.runCommand'):]
+        check = check[:check.index("'';")]
+        self.assertIn("grep -v '^time: ' report.txt > $out", check)
+        self.assertNotIn("tee $out", check)
 
     @unittest.skipUnless(SH, "needs sh")
     def test_all_compiling_exit_0(self):
