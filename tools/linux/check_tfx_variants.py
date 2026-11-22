@@ -14,7 +14,8 @@ Everything is read from the sources, nothing is listed by hand:
     `dev->X()`) is 0 or 1.
   - which of those values differ: every place tfx.glsl compares the macro with a constant (==, !=, <, <=, >, >=, &,
     or a bare test, which is != 0). Values giving the same answer to all of them are one class and the smallest is
-    compiled. A macro compared with another macro keeps all its values; one used in code other than in a comparison
+    compiled. A macro compared with another macro, or read in a directive any other way (arithmetic,
+    `#define ALIAS M`), keeps all its values; one used in code other than in a comparison
     (int(M), f(M), if (M)) also keeps its largest.
 
 Coverage rule, per stage (vert, frag), over the parameters (selector macros and device features):
@@ -488,8 +489,9 @@ def shader_constants(glsl: str) -> dict[str, int]:
 
 def macro_uses(glsl: str, macros: set[str]) -> dict[str, Uses]:
     """How tfx.glsl reads each macro: compared with integers, compared with another macro, tested for truth, or (in
-    code) used as a number. In a directive anything else is a SourceError: a comparison this script cannot evaluate
-    would otherwise merge values that compile differently."""
+    code) used as a number. In a directive anything else (arithmetic, an alias, a constant that is an expression)
+    keeps every value of the macro: a comparison this script cannot evaluate must not merge values that compile
+    differently."""
     text = strip_c_comments(glsl)
     consts = shader_constants(text)
     uses = {m: Uses(set()) for m in macros}
@@ -561,9 +563,10 @@ def macro_uses(glsl: str, macros: set[str]) -> dict[str, Uses]:
                 use.atoms.add(("!=", 0))
                 continue
             if directive:
-                raise SourceError(f"tfx.glsl:{n}: {t} is read as {line.strip()!r}, which "
-                                  f"{Path(__file__).name} cannot evaluate; compare it with an integer or a "
-                                  f"#define'd integer, or teach the script")
+                # Arithmetic, an alias, a constant that is an expression: the value classes cannot follow it, so
+                # every value is kept (Conditions evaluates the expression itself for the lines and searches).
+                use.exact = True
+                continue
             use.atoms.add(("!=", 0))
             use.value = True
     return uses
