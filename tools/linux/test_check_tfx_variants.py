@@ -908,6 +908,14 @@ class Tidy(unittest.TestCase):
         flake = (ROOT / "flake.nix").read_text()
         self.assertIn('python3 -I -m unittest discover -s tools/linux -p "test_*.py" -v', flake)
 
+    def test_docs_name_the_cost_of_arithmetic_and_the_model(self):
+        doc = ctv.__doc__
+        self.assertIn("Arithmetic over selectors in a directive keeps every value", doc)
+        self.assertIn("exact as far as the preprocessor is modelled", doc)
+        row = next(x for x in (ROOT / "docs/BUILDING.md").read_text().splitlines() if x.startswith("| `tfx-variants`"))
+        self.assertIn("arithmetic over selectors in a `#if` keeps every value", row)
+        self.assertIn("what that model does not cover stops the check", row)
+
     def test_tfxcc_says_it_does_both_paths(self):
         head = (HERE / "tfxcc" / "tfxcc.c").read_text().split("*/")[0]
         self.assertIn("both its paths", head)

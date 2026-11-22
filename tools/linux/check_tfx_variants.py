@@ -16,7 +16,9 @@ Everything is read from the sources, nothing is listed by hand:
     or a bare test, which is != 0). Values giving the same answer to all of them are one class and the smallest is
     compiled. A macro compared with another macro, or read in a directive any other way (arithmetic,
     `#define ALIAS M`), keeps all its values; one used in code other than in a comparison
-    (int(M), f(M), if (M)) also keeps its largest.
+    (int(M), f(M), if (M)) also keeps its largest. A #define'd integer it is compared with counts with every value
+    any of its definitions gives (and 0 if #undef'd). Arithmetic over selectors in a directive keeps every value of
+    each, which can raise the variant count a lot (pairs of 17 anisotropy values, say).
 
 Coverage rule, per stage (vert, frag), over the parameters (selector macros and device features):
   - every value class of every parameter, and every pair of classes of every two parameters;
@@ -127,6 +129,8 @@ CONSTRAINTS = [
     # copy a register field of their own width (ALPHA.A..D, TEST.ZTST, SCANMSK, CLAMP) or use every value
     # (pal_fmt, depth_fmt, process_*, dither). dst_fmt / aem_fmt are psm.fmt, 3 for a non-colour format, which a
     # draw can have: GSState::FlushPrim only warns about it (GSState.cpp, "Possible invalid draw"), in dev builds.
+    # Not a constraint: depth ROV without colour ROV. GetForcedROVUsage turns colour ROV on with depth ROV, but
+    # DetermineROVUsage calls it only when the draw has both targets (GSRendererHW.cpp, `if (rt && ds)`).
     Constraint("frag", ("PS_TFX",),
                lambda v: v["PS_TFX"] <= 4,
                "tfx is TFX_DECAL, TEX0.TFX (2 bits) or 4 (TFX_NONE)",
