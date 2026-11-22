@@ -1107,13 +1107,20 @@ def declarations_and_uses(cond: "Conditions") -> tuple[dict[str, list[tuple[str 
         declared_at = set()
         for i, t in enumerate(toks):
             if t in text_types and (i == 0 or toks[i - 1] != "."):
-                j = i + 1
-                if j < len(toks) and toks[j] == "[":  # float[2] name
-                    while j < len(toks) and toks[j] != "]":
-                        j += 1
-                    j += 1
+                def dims(k):
+                    """The [N][M] at toks[k], as text, and the index past them."""
+                    out = []
+                    while k < len(toks) and toks[k] == "[":
+                        end = k
+                        while end < len(toks) and toks[end] != "]":
+                            end += 1
+                        out.append("[" + " ".join(toks[k + 1:end]) + "]")
+                        k = end + 1
+                    return out, k
+                type_dims, j = dims(i + 1)  # float[2] name
                 while j < len(toks) and re.fullmatch(r"[A-Za-z_]\w*", toks[j]) and toks[j] not in text_types:
                     name, j = toks[j], j + 1
+                    name_dims, _ = dims(j)  # float name[2]
                     is_function = j < len(toks) and toks[j] == "(" and depth == 0 and parens == 0
                     # In a body: the function's. In the parentheses after a function's name: its parameter.
                     # Anything else at the top (a global, a function's own name) is global.
@@ -1127,8 +1134,8 @@ def declarations_and_uses(cond: "Conditions") -> tuple[dict[str, list[tuple[str 
                                     types.append(toks[k])
                                 k += 1
                             signature = (t, "(", *types)
-                        else:
-                            signature = (t,)
+                        else:  # the type with its array sizes: float[2] and float[4] are two kinds
+                            signature = (t, *type_dims, *name_dims)
                         decls.setdefault(name, []).append((scope, stack, signature))
                     declared_at.add(j - 1)
                     if is_function:

@@ -688,6 +688,16 @@ class Declarations(unittest.TestCase):
             with self.subTest(glsl=glsl), self.assertRaisesRegex(ctv.SourceError, "different depths"):
                 self.find(glsl)
 
+    def test_array_sizes_are_part_of_the_kind(self):
+        for two, four in (("float arr[2];", "float arr[4];"), ("float[2] arr;", "float[4] arr;"),
+                          ("float arr[2][2];", "float arr[2][4];")):
+            for first, second in ((two, four), (four, two)):  # either branch order
+                glsl = (f"void main()\n{{\n#if A == 1\n\t{first}\n#else\n\t{second}\n#endif\n"
+                        f"#if B && C == 3\n\tarr[1] = 1.0;\n#endif\n}}\n")
+                with self.subTest(glsl=glsl):
+                    found = sorted((env["A"] for name, _, (env, _) in self.find(glsl) if name == "arr" and env))
+                    self.assertEqual(found, [0, 1])  # each size meets the use alone
+
     def test_uses_through_define_bodies_follow_their_definition(self):
         glsl = ("#define USE (v + 1.0)\n"
                 "#if A == 1\n#define DROP { r = true; }\n#else\n#define DROP discard\n#endif\n"
