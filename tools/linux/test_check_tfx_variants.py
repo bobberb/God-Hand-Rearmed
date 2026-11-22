@@ -452,6 +452,37 @@ class Declarations(unittest.TestCase):
         (_, _, (env, finished)), = self.find(glsl, budget=1)
         self.assertEqual((env, finished), (None, False))
 
+    def missing(self, glsl):
+        return sorted({name for name, _, (env, _) in self.find(glsl) if env})
+
+    def test_scopes_parameters_and_globals(self):
+        glsl = ("vec4 blend(vec4 Color) { return Color; }\n"       # a parameter: blend's only
+                "float g;\n"                                         # a global, seen everywhere
+                "void main()\n{\n#if A != 2\n\tfloat Color = 0.0;\n\tfloat g2 = 0.0;\n#endif\n"
+                "#if B && C == 3\n\tColor += g;\n#endif\n}\n"
+                "void other()\n{\n\tfloat g2 = 1.0;\n#if B\n\tg2 += 1.0;\n#endif\n}\n")  # its own g2
+        self.assertEqual(self.missing(glsl), ["Color"])
+
+    def test_declarator_lists_arrays_types_and_structs(self):
+        for decl, use, name in (("float a = 0.0, m = f(1, 2);", "m += 1.0;", "m"),
+                                ("float[2] arr = float[2](0.0, 0.0);", "arr[0] += 1.0;", "arr"),
+                                ("float arr2[2];", "arr2[0] = 1.0;", "arr2"),
+                                ("mat3x3 m3 = mat3x3(1.0);", "m3[0][0] = 1.0;", "m3"),
+                                ("usampler2DArray us;", "x = us;", "us"),
+                                ("kamite_T kt;", "kt.x = 1.0;", "kt")):
+            glsl = (f"struct kamite_T {{ float x; }};\nvoid main()\n{{\n#if A != 2\n\t{decl}\n#endif\n"
+                    f"#if B && C == 3\n\t{use}\n#endif\n}}\n")
+            with self.subTest(decl=decl):
+                self.assertEqual(self.missing(glsl), [name])
+
+    def test_uses_through_define_bodies_follow_their_definition(self):
+        glsl = ("#define USE (v + 1.0)\n"
+                "#if A == 1\n#define DROP { r = true; }\n#else\n#define DROP discard\n#endif\n"
+                "void main()\n{\n#if A != 2\n\tfloat v = 0.0;\n#endif\n#if A == 1\n\tbool r;\n#endif\n"
+                "#if B && C == 3\n\tz = USE;\n\tDROP;\n#endif\n}\n")
+        # v through USE: missing at A = 2. r: only the A == 1 DROP reads it, and there r is declared.
+        self.assertEqual(self.missing(glsl), ["v"])
+
     def test_critic_repros_get_a_variant(self):
         base = (ROOT / ctv.TFX).read_text()
         anchor = "#if PS_ZTST == ZTST_GEQUAL"

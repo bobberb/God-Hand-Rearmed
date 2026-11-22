@@ -22,12 +22,16 @@ Coverage rule, per stage (vert, frag), over the parameters (selector macros and 
   - every triple of classes of every three parameters one block of tfx.glsl is conditioned on (its #if / #elif and
     all those around it, with the shader's own #defines like SW_BLEND or ZWRITE and the header's like
     DISABLE_TEXTURE_BARRIER expanded to what they read);
-  - for every use of a name tfx.glsl declares under a condition (a variable, a function, a #define) where none of its
-    declarations is sure to be compiled with it: a variant compiling the use and none of the declarations, if the
-    constraints allow one. A depth-first search over the #if conditions (evaluated, three-valued) finds it or proves
-    there is none; a search past its budget is an error. Declarations are read by type keyword (GLSL_TYPES), one per
-    match, with no scopes: a name declared again in another function counts as declared, so a variant may be added
-    that compiles fine (the compiler is the judge), and a declaration this misses is a name it never checks.
+  - every line of tfx.glsl a game build can compile, compiled by some variant: each block (#if stack) no variant
+    compiles gets a search for parameter values that compile it; none found proves no game build does;
+  - for every use of a name whose declarations in reach (in its function, its function's parameters, the globals,
+    the shader's #defines) are all under some condition not around the use: a variant compiling the use and none
+    of them, if the constraints allow one. Uses through a #define body count, under that definition's #if.
+  Both searches are depth first over the #if conditions (evaluated, three-valued) and prove it when they find
+  nothing; one past its budget is an error. Declarations are read by type (GLSL's, and the structs tfx.glsl
+  declares), with declarator lists and `type[N]`. Not told apart: block scopes inside a function (a name declared
+  in an inner { } counts for the whole function), names made by token pasting or function-like macro arguments, and
+  interface-block instance names; a variant this adds for nothing compiles, one it misses is a gap.
 All of it in a greedy covering array, deterministic. Combinations no game build can contain are left out by
 CONSTRAINTS below, each citing the game code that rules it out; one the greedy fill could not place in any variant is
 an error. Variants whose assembled source is the same text are compiled once.
@@ -694,9 +698,6 @@ def interaction_groups(cond: "Conditions") -> list[tuple[str, ...]]:
 # Which code a variant compiles: tfx.glsl's #if expressions evaluated, three-valued (None: depends on a parameter not
 # chosen yet), so a search can find a variant that compiles a use of a name without any of its declarations.
 
-GLSL_TYPES = ("void bool int uint float double vec2 vec3 vec4 ivec2 ivec3 ivec4 uvec2 uvec3 uvec4 bvec2 bvec3 bvec4 "
-              "mat2 mat3 mat4 sampler2D texture2D image2D subpassInput").split()
-DECLARATION = re.compile(r"\b(?:" + "|".join(GLSL_TYPES) + r")\s+([A-Za-z_]\w*)")
 PRECEDENCE = [("||",), ("&&",), ("|",), ("^",), ("&",), ("==", "!="), ("<", "<=", ">", ">="), ("<<", ">>"),
               ("+", "-"), ("*", "/", "%")]
 
@@ -913,29 +914,126 @@ class Conditions:
         return out
 
 
-def use_without_declaration(cond: Conditions) -> list[tuple[str, int, tuple, list[tuple]]]:
-    """(name, line, use stack, declaration stacks) for each use of a name tfx.glsl declares (a variable, a function or
-    a #define) where no declaration is sure to be compiled with the use: none of the declarations' stacks is a prefix
-    of the use's. Lines this stage never compiles are left out."""
-    live = [(n, stack, line) for n, stack, line in cond.lines if cond.stack_value(stack, {}) != 0]
-    decls: dict[str, set[tuple]] = {}
-    for n, stack, line in live:
+def _glsl_types() -> set[str]:
+    out = set("void bool int uint float double atomic_uint".split())
+    for n in "234":
+        out |= {f"{p}vec{n}" for p in ("", "i", "u", "b", "d")}
+        out |= {f"mat{n}", f"dmat{n}"} | {f"{d}mat{n}x{m}" for d in ("", "d") for m in "234"}
+    dims = ("1D 2D 3D Cube 2DRect 1DArray 2DArray CubeArray Buffer 2DMS 2DMSArray").split()
+    for p in ("", "i", "u"):
+        out |= {f"{p}{kind}{d}" for kind in ("sampler", "texture", "image") for d in dims}
+        out |= {f"{p}subpassInput", f"{p}subpassInputMS"}
+    out |= {f"sampler{d}Shadow" for d in ("1D", "2D", "Cube", "2DRect", "1DArray", "2DArray", "CubeArray")}
+    return out | {"sampler", "samplerShadow"}
+
+
+GLSL_TYPES = _glsl_types()
+
+
+def declarations_and_uses(cond: "Conditions") -> tuple[dict[str, list[tuple[str | None, tuple]]],
+                                                       list[tuple[str, int, str | None, tuple]]]:
+    """Every declaration in tfx.glsl as name -> [(scope, stack)] and every use as (name, line, scope, stack), scope
+    the enclosing function (None: global). A declaration is a GLSL or struct type (`type[N]` too) followed by its
+    declarators (`float a = 0.0, b;` declares both); a function's parameters are in its scope; a #define is global.
+    A use of one of the shader's #defines also uses every name in each of its bodies, under the use's #if stack and
+    that definition's (so a name only one definition reads is used only where that one is compiled). Lines this
+    stage never compiles are left out of both, but count for the braces."""
+    text_types = GLSL_TYPES | set(re.findall(r"\bstruct\s+([A-Za-z_]\w*)", "\n".join(x for _, _, x in cond.lines)))
+    bodies: dict[str, list[tuple[tuple, set[str]]]] = {}
+    for _, stack, line in cond.lines:
+        m = re.match(r"\s*#\s*define\s+([A-Za-z_]\w*)(?:\([^)]*\))?(.*)", line)
+        if m and cond.stack_value(stack, {}) != 0:
+            bodies.setdefault(m.group(1), []).append(
+                (stack, set(re.findall(r"(?<![.\w])([A-Za-z_]\w*)", m.group(2)))))
+
+    def expand(name, stack, seen=frozenset()):
+        """(name, stack) for the name and, through every body of a #define, each name it reads."""
+        yield name, stack
+        if name not in seen:
+            for where, names in bodies.get(name, ()):
+                for inner in names:
+                    yield from expand(inner, stack + where, seen | {name})
+
+    decls: dict[str, list[tuple[str | None, tuple]]] = {}
+    uses = []
+    depth, parens, function, pending = 0, 0, None, None
+    for n, stack, line in cond.lines:
+        live = cond.stack_value(stack, {}) != 0
         m = re.match(r"\s*#\s*define\s+([A-Za-z_]\w*)", line)
-        found = [m.group(1)] if m else [] if line.lstrip().startswith("#") else DECLARATION.findall(line)
-        for name in found:
-            if name not in cond.names:
-                decls.setdefault(name, set()).add(stack)
-    out, seen = [], set()
-    for n, stack, line in live:
+        if m:
+            if live and m.group(1) not in cond.names:
+                decls.setdefault(m.group(1), []).append((None, stack))
+            continue
         if line.lstrip().startswith("#"):
             continue
-        declared_here = set(DECLARATION.findall(line))
-        for name in re.findall(r"(?<![.\w])([A-Za-z_]\w*)", line):
-            if name not in decls or name in declared_here or (name, stack) in seen:
-                continue
-            seen.add((name, stack))
-            if not any(stack[:len(d)] == d for d in decls[name]):
-                out.append((name, n, stack, sorted(decls[name], key=len)))
+        toks = TOKEN.findall(line)
+        declared_at = set()
+        for i, t in enumerate(toks):
+            if t in text_types and (i == 0 or toks[i - 1] != "."):
+                j = i + 1
+                if j < len(toks) and toks[j] == "[":  # float[2] name
+                    while j < len(toks) and toks[j] != "]":
+                        j += 1
+                    j += 1
+                while j < len(toks) and re.fullmatch(r"[A-Za-z_]\w*", toks[j]) and toks[j] not in text_types:
+                    name, j = toks[j], j + 1
+                    is_function = j < len(toks) and toks[j] == "(" and depth == 0 and parens == 0
+                    # In a body: the function's. In the parentheses after a function's name: its parameter.
+                    # Anything else at the top (a global, a function's own name) is global.
+                    scope = function if depth else pending if parens and pending else None
+                    if live and name not in cond.names:
+                        decls.setdefault(name, []).append((scope, stack))
+                    declared_at.add(j - 1)
+                    if is_function:
+                        pending = name
+                        break
+                    nest = 0  # past [N] and = initialiser, to a ',' starting the next declarator or the end
+                    while j < len(toks) and (nest or toks[j] not in (",", ";", ")")):
+                        nest += {"(": 1, "[": 1, "{": 1, ")": -1, "]": -1, "}": -1}.get(toks[j], 0)
+                        j += 1
+                    if j < len(toks) and toks[j] == "," and not (depth == 0 and parens):
+                        j += 1
+                        continue
+                    break
+            if t == "(" and depth == 0:
+                parens += 1
+            elif t == ")" and depth == 0:
+                parens -= 1
+            elif t == "{":
+                if depth == 0:
+                    function, pending = pending, None
+                depth += 1
+            elif t == "}":
+                depth -= 1
+                if depth == 0:
+                    function = None
+                if depth < 0:
+                    raise SourceError(f"tfx.glsl:{n}: '}}' without '{{'")
+            elif t == ";" and depth == 0 and parens == 0:
+                pending = None
+        if live:
+            for i, t in enumerate(toks):
+                if re.fullmatch(r"[A-Za-z_]\w*", t) and i not in declared_at and (i == 0 or toks[i - 1] != "."):
+                    for name, at in expand(t, stack):
+                        uses.append((name, n, function, at))
+    if depth:
+        raise SourceError("tfx.glsl: unbalanced braces")
+    return decls, uses
+
+
+def use_without_declaration(cond: "Conditions") -> list[tuple[str, int, tuple, list[tuple]]]:
+    """(name, line, use stack, declaration stacks) for each use of a name tfx.glsl declares where no declaration in
+    reach (the function's own, its parameters, the globals) is sure to be compiled with the use: none of their
+    stacks is a prefix of the use's."""
+    decls, uses = declarations_and_uses(cond)
+    out, seen = [], set()
+    for name, n, scope, stack in uses:
+        if (name, scope, stack) in seen or name not in decls:
+            continue
+        seen.add((name, scope, stack))
+        reach = sorted({st for sc, st in decls[name] if sc is None or sc == scope}, key=len)
+        if reach and not any(stack[:len(d)] == d for d in reach):
+            out.append((name, n, stack, reach))
     return out
 
 
