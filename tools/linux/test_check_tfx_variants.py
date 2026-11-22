@@ -652,7 +652,8 @@ class Covering(unittest.TestCase):
                          ctv.covering(self.PARAMS, [("A", "B", "D")], self.CONS))
 
 
-OK_COMPILER = f"{SH} -c '! grep -q \"^#error\"' fake"  # compiles all but the probe's bad source
+# Compiles all but the probes' bad sources (an #error, a type error).
+OK_COMPILER = f"{SH} -c '! grep -q -e \"^#error\" -e probe_type_error' fake"
 
 
 class Style(unittest.TestCase):
@@ -670,7 +671,7 @@ class Report(unittest.TestCase):
     @unittest.skipUnless(SH, "needs sh")
     def test_failing_variants_named_and_exit_1(self):
         # A stand-in compiler that fails exactly the variants with the see-through oval on.
-        fake = f"{SH} -c '! grep -q -e \"^#define PS_SEE_THROUGH 1$\" -e \"^#error\"' fake"
+        fake = f"{SH} -c '! grep -q -e \"^#define PS_SEE_THROUGH 1$\" -e \"^#error\" -e probe_type_error' fake"
         out = io.StringIO()
         with contextlib.redirect_stdout(out):
             rc = ctv.main(["--compiler", fake])
@@ -706,6 +707,7 @@ class Report(unittest.TestCase):
     @unittest.skipUnless(SH, "needs sh")
     def test_a_compiler_that_cannot_fail_or_cannot_pass_stops(self):
         for compiler in (f"{SH} -c 'cat > /dev/null' fake", f"{SH} -c 'cat > /dev/null; exit 1' fake",
+                         f"{SH} -c '! grep -q \"^#error\"' fake",  # a preprocessor: fails #error, passes type errors
                          "/nonexistent/tfxcc"):
             err = io.StringIO()
             with contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(err):
@@ -715,7 +717,8 @@ class Report(unittest.TestCase):
     @unittest.skipUnless(SH, "needs sh")
     def test_debug_pass_compiles_every_variant_again(self):
         # Fails the see-through variants only when called with "debug" (and the probe's #error source always).
-        fake = (f"{SH} -c 'src=$(cat); case \"$src\" in *\"#error\"*) exit 1;; esac; [ \"$2\" = debug ] && "
+        fake = (f"{SH} -c 'src=$(cat); case \"$src\" in *\"#error\"*|*probe_type_error*) exit 1;; esac; "
+                f"[ \"$2\" = debug ] && "
                 f"case \"$src\" in *\"#define PS_SEE_THROUGH 1\"*) exit 1;; esac; exit 0' fake")
         out = io.StringIO()
         with contextlib.redirect_stdout(out):

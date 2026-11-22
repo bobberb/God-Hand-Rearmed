@@ -1312,6 +1312,8 @@ PROBES = [  # (stage, source, exit code the compiler must give)
     ("vert", "#version 460 core\nvoid main() { gl_Position = vec4(0.0); }\n", 0),
     ("frag", "#version 460 core\nlayout(location = 0) out vec4 o;\nvoid main() { o = vec4(1.0); }\n", 0),
     ("frag", "#version 460 core\n#error check_tfx_variants probe: this source must not compile\nvoid main() {}\n", 1),
+    # A preprocessor alone passes the one above; only a compiler fails this.
+    ("frag", "#version 460 core\nvoid main() { int probe_type_error = vec4(1.0); }\n", 1),
 ]
 
 
