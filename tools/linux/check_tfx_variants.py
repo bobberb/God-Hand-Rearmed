@@ -315,10 +315,22 @@ def check_shader_path(cpp: str) -> None:
         raise SourceError(f"{DEVICE_CPP} no longer reads shaders/vulkan/tfx.glsl into m_tfx_source")
 
 
-def parse_enums(enums_h: str) -> dict[str, list[int]]:
+def parse_enums(enums_h: str) -> dict[str, list[int] | SourceError]:
+    """Each enum class's member values: `NAME = <integer>`, or `NAME` (the previous value + 1, the first 0). An enum
+    with any other member maps to the SourceError, raised only if a selector field uses it."""
     out = {}
-    for m in re.finditer(r"enum class (\w+)\s*:\s*\w+\s*\{(.*?)\}", enums_h, re.S):
-        values = [int(v, 0) for v in re.findall(r"=\s*(\w+)", strip_c_comments(m.group(2)))]
+    for m in re.finditer(r"enum class (\w+)\s*:\s*\w+\s*\{(.*?)\}", strip_c_comments(enums_h), re.S):
+        values, nxt = [], 0
+        for member in (x.strip() for x in m.group(2).split(",")):
+            if not member:
+                continue
+            mm = re.fullmatch(r"\w+(?:\s*=\s*((?:0[xX][0-9a-fA-F]+|\d+)[uU]?))?", member)
+            if not mm:
+                values = SourceError(f"{ENUMS_H}: enum {m.group(1)} member {member!r} is not NAME or NAME = <integer>")
+                break
+            nxt = int_literal(mm.group(1)) if mm.group(1) else nxt
+            values.append(nxt)
+            nxt += 1
         out[m.group(1)] = values
     return out
 
@@ -337,7 +349,10 @@ def parse_selector(device_h: str, name: str, enums: dict[str, list[int]]) -> dic
         if type_ in ("u8", "u16", "u32", "u64"):
             fields[field] = list(width)
         elif aliases.get(type_, type_) in enums:
-            fields[field] = [v for v in enums[aliases.get(type_, type_)] if v in width]
+            values = enums[aliases.get(type_, type_)]
+            if isinstance(values, SourceError):
+                raise values
+            fields[field] = [v for v in values if v in width]
         else:
             raise SourceError(f"{DEVICE_H}: {name}.{field} has type {type_}, neither unsigned nor a GSShader enum")
     if not fields:

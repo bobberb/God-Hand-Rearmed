@@ -283,6 +283,22 @@ static void AddShaderHeader(std::stringstream& ss)
         with self.assertRaisesRegex(ctv.SourceError, r"GSDeviceVK\.cpp:\d+: GetTFXFragmentShader statement 'if"):
             ctv.parse_stages(bent)
 
+    def test_enum_members_implicit_and_explicit(self):
+        enums = ctv.parse_enums("enum class A : u32\n{\n\tX = 0, // c\n\tY,\n\tZ = 0x4,\n\tW\n};\n"
+                                "enum class B : u8 { P = 1 << 1, Q };\n")
+        self.assertEqual(enums["A"], [0, 1, 4, 5])
+        self.assertIsInstance(enums["B"], ctv.SourceError)
+        device_h = "using B = GSShader::B;\nstruct S { union { struct { u32 a : 1; B b : 2; }; }; };\n"
+        with self.assertRaisesRegex(ctv.SourceError, "1 << 1"):
+            ctv.parse_selector(device_h, "S", enums)
+
+    def test_real_afail_gains_an_added_member(self):
+        enums_h = (ROOT / ctv.ENUMS_H).read_text()
+        bent = enums_h.replace("RGB_ONLY_SW_Z = 5, ///< RGB only with software Z discard",
+                               "RGB_ONLY_SW_Z = 5, ///< RGB only with software Z discard\n\tRGB_ONLY_NEW,")
+        self.assertNotEqual(bent, enums_h)
+        self.assertEqual(ctv.parse_enums(bent)["PS_AFAIL"], [0, 1, 2, 3, 4, 5, 6])
+
     def test_selector_bitfields_and_enums(self):
         device_h = """
 using E = GSShader::E;
