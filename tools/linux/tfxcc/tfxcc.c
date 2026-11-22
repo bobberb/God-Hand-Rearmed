@@ -1,5 +1,5 @@
 /* tfxcc: compile one GLSL source from stdin the way the Vulkan renderer does (VKShaderCache::CompileShaderToSPV,
- * thirdparty/pcsx2/pcsx2/GS/Renderers/Vulkan/VKShaderCache.cpp, its non-debug path): the same libshaderc, the same
+ * thirdparty/pcsx2/pcsx2/GS/Renderers/Vulkan/VKShaderCache.cpp, both its paths): the same libshaderc, the same
  * options, input name and entry point. For tools/linux/check_tfx_variants.py.
  *
  *   tfxcc vert|frag [debug] < source.glsl   exit 0 compiled, 1 failed (shaderc's messages on stderr), 2 bad usage

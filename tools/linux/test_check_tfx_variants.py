@@ -30,6 +30,7 @@ def _memo_load(load=ctv.load, cache={}):
         if key not in cache:
             cache[key] = load(root, tfx_path)
         return cache[key]
+    cached.original = load
     return cached
 
 
@@ -661,6 +662,31 @@ class Style(unittest.TestCase):
         for path in (HERE / "check_tfx_variants.py", Path(__file__), HERE / "tfxcc" / "tfxcc.c"):
             for n, line in enumerate(path.read_text().splitlines(), 1):
                 self.assertLessEqual(len(line), 120, f"{path.name}:{n}")
+
+
+class Tidy(unittest.TestCase):
+    def test_one_parse_of_the_cpp_per_load(self):
+        calls = {"parse_stages": 0, "parse_stage_macros": 0}
+        real = {name: getattr(ctv, name) for name in calls}
+
+        def counting(name):
+            def wrapper(*args, **kwargs):
+                calls[name] += 1
+                return real[name](*args, **kwargs)
+            return wrapper
+        try:
+            for name in calls:
+                setattr(ctv, name, counting(name))
+            ctv.load.original(ROOT, None)
+        finally:
+            for name, fn in real.items():
+                setattr(ctv, name, fn)
+        self.assertEqual(calls, {"parse_stages": 1, "parse_stage_macros": 1})
+
+    def test_tfxcc_says_it_does_both_paths(self):
+        head = (HERE / "tfxcc" / "tfxcc.c").read_text().split("*/")[0]
+        self.assertIn("both its paths", head)
+        self.assertNotIn("non-debug path", head)
 
 
 class Report(unittest.TestCase):
