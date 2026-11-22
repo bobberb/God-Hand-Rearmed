@@ -477,14 +477,22 @@ def int_literal(token: str) -> int:
     return int(token.rstrip("uU"), 16 if token[:2] in ("0x", "0X") else 10)
 
 
-def shader_constants(glsl: str) -> dict[str, int]:
-    """`#define NAME 3`, `0x10`, `2u`, `(3)`: names standing for one integer."""
-    out = {}
-    for name, body in re.findall(r"^\s*#\s*define\s+(\w+)[ \t]+(.+?)\s*$", glsl, re.M):
-        m = re.fullmatch(r"\(?\s*((?:0[xX][0-9a-fA-F]+|\d+)[uU]?)\s*\)?", body)
+def shader_constants(glsl: str) -> dict[str, frozenset[int]]:
+    """Names tfx.glsl defines only as integers (`3`, `0x10`, `2u`, `(3)`), each with every value it can have at a
+    comparison: every one of its #defines, whatever #if it is under, and 0 if it is ever #undef'd. A name with any
+    other definition is not a constant (a comparison with it keeps every value of the macro)."""
+    values: dict[str, set[int]] = {}
+    other = set()
+    for kind, name, body in re.findall(r"^\s*#\s*(define|undef)\s+(\w+)(?:[ \t]+(.*?))?\s*$", glsl, re.M):
+        if kind == "undef":
+            values.setdefault(name, set()).add(0)
+            continue
+        m = re.fullmatch(r"\(?\s*((?:0[xX][0-9a-fA-F]+|\d+)[uU]?)\s*\)?", body or "")
         if m:
-            out.setdefault(name, int_literal(m.group(1)))
-    return out
+            values.setdefault(name, set()).add(int_literal(m.group(1)))
+        else:
+            other.add(name)
+    return {name: frozenset(v) for name, v in values.items() if name not in other}
 
 
 def macro_uses(glsl: str, macros: set[str]) -> dict[str, Uses]:
@@ -504,7 +512,7 @@ def macro_uses(glsl: str, macros: set[str]) -> dict[str, Uses]:
         if 0 <= k < len(toks):
             t = toks[k]
             if INT.fullmatch(t):
-                return int_literal(t), k + 1
+                return frozenset({int_literal(t)}), k + 1
             if t in macros:
                 return t, k + 1
             if t in consts:
@@ -548,7 +556,7 @@ def macro_uses(glsl: str, macros: set[str]) -> dict[str, Uses]:
                     if isinstance(got[0], str):
                         use.exact = True
                     else:
-                        use.atoms.add((right, got[0]))
+                        use.atoms |= {(right, c) for c in got[0]}
                     continue
             if left in CMP and right in right_ok:
                 got = operand_left(toks, lo - 2)
@@ -556,7 +564,7 @@ def macro_uses(glsl: str, macros: set[str]) -> dict[str, Uses]:
                     if isinstance(got[0], str):
                         use.exact = True
                     else:
-                        use.atoms.add((FLIP[left], got[0]))
+                        use.atoms |= {(FLIP[left], c) for c in got[0]}
                     continue
             # A truth test only in a directive: in code, int(M), f(M) or if (M) all see the number.
             if directive and left in LEFT_OK and right in RIGHT_OK:

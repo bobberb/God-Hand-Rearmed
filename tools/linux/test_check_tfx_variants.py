@@ -234,6 +234,34 @@ class ValueClasses(unittest.TestCase):
         self.assertEqual(u.atoms, {("&", 2), (">", 3)})
         self.assertEqual(ctv.value_classes(list(range(8)), u), [0, 2, 4, 6])
 
+    def test_a_constant_counts_every_definition(self):
+        # Redefined after an #undef, and defined per branch: each value is a comparison point.
+        glsl = ("#define K 1\n#undef K\n#define K 2\n#if A\n#define L 4\n#else\n#define L 8\n#endif\n"
+                "#if M == K\n#endif\n#if N == L\n#endif\n")
+        uses = self.uses(glsl, "M", "N")
+        self.assertEqual(uses["M"].atoms, {("==", 0), ("==", 1), ("==", 2)})
+        self.assertEqual(uses["N"].atoms, {("==", 4), ("==", 8)})
+        self.assertEqual(ctv.value_classes([0, 1, 2, 3], uses["M"]), [0, 1, 2, 3])
+        self.assertEqual(ctv.value_classes(list(range(17)), uses["N"]), [0, 4, 8])
+        # One definition that is no integer: not a constant, every value kept.
+        u = self.uses("#define K 1\n#if A\n#undef K\n#define K (2 + 1)\n#endif\n#if M == K\n#endif\n", "M")["M"]
+        self.assertTrue(u.exact)
+
+    def test_critic_repros_constants_by_branch_and_undef(self):
+        base = (ROOT / ctv.TFX).read_text()
+        main, anchor = "void main()\n{\n#if PS_SEE_THROUGH\n", "#if PS_ZTST == ZTST_GEQUAL"
+        for defs, cond, name, value in (
+                ("#define KAMITE_RG 1\n#undef KAMITE_RG\n#define KAMITE_RG 2\n", "PS_PROCESS_RG == KAMITE_RG",
+                 "PS_PROCESS_RG", 2),
+                ("#if PS_FOG\n#define KAMITE_LIM 4\n#else\n#define KAMITE_LIM 8\n#endif\n",
+                 "PS_ANISOTROPIC_FILTERING == KAMITE_LIM", "PS_ANISOTROPIC_FILTERING", 8)):
+            tfx = base.replace(main, defs + main, 1).replace(
+                anchor, f"#if {cond}\n\tinput_z += 0.0;\n#endif\n" + anchor, 1)
+            with tempfile.TemporaryDirectory() as d:
+                (Path(d) / "tfx.glsl").write_text(tfx)
+                src = ctv.load(tfx_path=Path(d) / "tfx.glsl")
+            self.assertIn(value, dict((p.name, p.values) for p in src.stages[1].params)[name])
+
     def test_bare_tests_and_values_in_code(self):
         u = self.uses("#if M\n#endif\nfloat x = min(y, M);\n", "M")["M"]
         self.assertEqual(ctv.value_classes(list(range(32)), u), [0, 1, 31])
