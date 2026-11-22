@@ -1047,10 +1047,12 @@ def declarations_and_uses(cond: "Conditions") -> tuple[dict[str, list[tuple[str 
     depth, parens, function, pending = 0, 0, None, None
     for n, stack, line in cond.lines:
         live = cond.stack_value(stack, {}) != 0
-        m = re.match(r"\s*#\s*define\s+([A-Za-z_]\w*)", line)
+        m = re.match(r"\s*#\s*define\s+([A-Za-z_]\w*)(.*)", line)
         if m:
             if live and m.group(1) not in cond.names:
-                decls.setdefault(m.group(1), []).append((None, stack, ("#define",)))
+                # Each body its own kind: a use meets each alone (vec4(1.0) under one #if, 1.0 under another).
+                body = " ".join(TOKEN.findall(m.group(2)))
+                decls.setdefault(m.group(1), []).append((None, stack, ("#define", body)))
             continue
         if line.lstrip().startswith("#"):
             continue

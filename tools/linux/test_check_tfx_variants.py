@@ -604,13 +604,36 @@ class Declarations(unittest.TestCase):
         self.assertEqual([e["A"] for e in found], [0, 1])
         self.assertTrue(all(e["B"] == 1 and e["C"] == 3 for e in found))
 
+    def test_each_body_of_a_define_meets_the_use_alone(self):
+        glsl = ("#if A == 1\n#define K vec4(1.0)\n#else\n#define K 1.0\n#endif\n"
+                "void main()\n{\n#if B && C == 3\n\tfloat k = K;\n#endif\n}\n")
+        found = sorted((env for name, _, (env, _) in self.find(glsl) if name == "K" and env), key=lambda e: e["A"])
+        self.assertEqual([e["A"] for e in found], [0, 1])  # 1.0 alone, vec4(1.0) alone
+        self.assertTrue(all(e["B"] == 1 and e["C"] == 3 for e in found))
+
+    def test_critic_repros_a_define_per_branch_used_in_code(self):
+        base = (ROOT / ctv.TFX).read_text()
+        main, anchor = "void main()\n{\n#if PS_SEE_THROUGH\n", "#if PS_ZTST == ZTST_GEQUAL"
+        for good, bad in (("1.0", "vec4(1.0)"), ("1.0", "kamite_undeclared")):
+            tfx = base.replace(main, f"#if PS_FOG\n#define KAMITE_K {bad}\n#else\n#define KAMITE_K {good}\n#endif\n"
+                               + main, 1).replace(anchor, "#if PS_CHANNEL_FETCH == 5 && PS_BLEND_HW == 6 && "
+                                                  "PS_DITHER == 2\n\tfloat kamite_k = KAMITE_K;\n#endif\n" + anchor, 1)
+            with tempfile.TemporaryDirectory() as d:
+                (Path(d) / "tfx.glsl").write_text(tfx)
+                src = ctv.load(tfx_path=Path(d) / "tfx.glsl")
+            vs, _ = ctv.variants(src)
+            self.assertTrue(any(v.values["PS_FOG"] == 1 and v.values["PS_CHANNEL_FETCH"] == 5
+                                and v.values["PS_BLEND_HW"] == 6 and v.values["PS_DITHER"] == 2
+                                for v in vs if v.stage == "frag"), bad)
+
     def test_uses_through_define_bodies_follow_their_definition(self):
         glsl = ("#define USE (v + 1.0)\n"
                 "#if A == 1\n#define DROP { r = true; }\n#else\n#define DROP discard\n#endif\n"
                 "void main()\n{\n#if A != 2\n\tfloat v = 0.0;\n#endif\n#if A == 1\n\tbool r;\n#endif\n"
                 "#if B && C == 3\n\tz = USE;\n\tDROP;\n#endif\n}\n")
-        # v through USE: missing at A = 2. r: only the A == 1 DROP reads it, and there r is declared.
-        self.assertEqual(self.missing(glsl), ["v"])
+        # v through USE: missing at A = 2. r: only the A == 1 DROP reads it, and there r is declared. DROP itself has
+        # two bodies, so each meets the use alone (both compile).
+        self.assertEqual(self.missing(glsl), ["DROP", "v"])
 
     def test_critic_repros_get_a_variant(self):
         base = (ROOT / ctv.TFX).read_text()
@@ -651,8 +674,11 @@ class Declarations(unittest.TestCase):
         # gl_FragDepth is a builtin its redeclaration only qualifies: writing it without one compiles. RtSampler and
         # DepthSampler are a texture2D or a subpassInput by branch: each kind meets its uses alone. The compiler
         # confirms all of them on the variants this adds.
+        # DISCARD / DISCARD_COLOR / DISCARD_DEPTH have a ROV body and a plain one, PS_VERTEX_COLOR one per
+        # PS_PERSP_COLOR: each body meets its uses alone.
         self.assertEqual(sorted({n for n, _, _ in src.stages[1].missing}),
-                         ["DepthSampler", "RtSampler", "gl_FragDepth"])
+                         ["DISCARD", "DISCARD_COLOR", "DISCARD_DEPTH", "DepthSampler", "PS_VERTEX_COLOR", "RtSampler",
+                          "gl_FragDepth"])
 
 
 class ShaderMacros(unittest.TestCase):
