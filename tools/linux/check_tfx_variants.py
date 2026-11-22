@@ -26,7 +26,10 @@ Coverage rule, per stage (vert, frag), over the parameters (selector macros and 
     compiles gets a search for parameter values that compile it; none found proves no game build does;
   - for every use of a name whose declarations in reach (in its function, its function's parameters, the globals,
     the shader's #defines) are all under some condition not around the use: a variant compiling the use and none
-    of them, if the constraints allow one. Uses through a #define body count, under that definition's #if.
+    of them, if the constraints allow one; and where those declarations differ in type or signature (an
+    overload per branch, a sampler type per branch), one per kind with every other kind left out, so the use meets
+    each alone. Uses through a #define body count, under that definition's #if. A signature is read from the line
+    naming the function.
   Both searches are depth first over the #if conditions (evaluated, three-valued) and prove it when they find
   nothing; one past its budget is an error. Declarations are read by type (GLSL's, and the structs tfx.glsl
   declares), with declarator lists and `type[N]`. Not told apart: block scopes inside a function (a name declared
@@ -964,7 +967,7 @@ def _glsl_types() -> set[str]:
 GLSL_TYPES = _glsl_types()
 
 
-def declarations_and_uses(cond: "Conditions") -> tuple[dict[str, list[tuple[str | None, tuple]]],
+def declarations_and_uses(cond: "Conditions") -> tuple[dict[str, list[tuple[str | None, tuple, tuple]]],
                                                        list[tuple[str, int, str | None, tuple]]]:
     """Every declaration in tfx.glsl as name -> [(scope, stack)] and every use as (name, line, scope, stack), scope
     the enclosing function (None: global). A declaration is a GLSL or struct type (`type[N]` too) followed by its
@@ -988,7 +991,7 @@ def declarations_and_uses(cond: "Conditions") -> tuple[dict[str, list[tuple[str 
                 for inner in names:
                     yield from expand(inner, stack + where, seen | {name})
 
-    decls: dict[str, list[tuple[str | None, tuple]]] = {}
+    decls: dict[str, list[tuple[str | None, tuple, tuple]]] = {}  # name -> (scope, stack, signature)
     uses = []
     depth, parens, function, pending = 0, 0, None, None
     for n, stack, line in cond.lines:
@@ -996,7 +999,7 @@ def declarations_and_uses(cond: "Conditions") -> tuple[dict[str, list[tuple[str 
         m = re.match(r"\s*#\s*define\s+([A-Za-z_]\w*)", line)
         if m:
             if live and m.group(1) not in cond.names:
-                decls.setdefault(m.group(1), []).append((None, stack))
+                decls.setdefault(m.group(1), []).append((None, stack, ("#define",)))
             continue
         if line.lstrip().startswith("#"):
             continue
@@ -1016,7 +1019,17 @@ def declarations_and_uses(cond: "Conditions") -> tuple[dict[str, list[tuple[str 
                     # Anything else at the top (a global, a function's own name) is global.
                     scope = function if depth else pending if parens and pending else None
                     if live and name not in cond.names:
-                        decls.setdefault(name, []).append((scope, stack))
+                        if is_function:  # its parameter types, as far as this line shows them
+                            k, nest, types = j + 1, 1, []
+                            while k < len(toks) and nest:
+                                nest += {"(": 1, ")": -1}.get(toks[k], 0)
+                                if toks[k] in text_types:
+                                    types.append(toks[k])
+                                k += 1
+                            signature = (t, "(", *types)
+                        else:
+                            signature = (t,)
+                        decls.setdefault(name, []).append((scope, stack, signature))
                     declared_at.add(j - 1)
                     if is_function:
                         pending = name
@@ -1058,16 +1071,26 @@ def declarations_and_uses(cond: "Conditions") -> tuple[dict[str, list[tuple[str 
 def use_without_declaration(cond: "Conditions") -> list[tuple[str, int, tuple, list[tuple]]]:
     """(name, line, use stack, declaration stacks) for each use of a name tfx.glsl declares where no declaration in
     reach (the function's own, its parameters, the globals) is sure to be compiled with the use: none of their
-    stacks is a prefix of the use's."""
+    stacks is a prefix of the use's. And where those declarations differ in type or signature, one entry per kind,
+    whose declaration stacks are all the other kinds'."""
     decls, uses = declarations_and_uses(cond)
     out, seen = [], set()
     for name, n, scope, stack in uses:
         if (name, scope, stack) in seen or name not in decls:
             continue
         seen.add((name, scope, stack))
-        reach = sorted({st for sc, st in decls[name] if sc is None or sc == scope}, key=len)
+        seen_decls = [(st, sig) for sc, st, sig in decls[name] if sc is None or sc == scope]
+        reach = sorted({st for st, _ in seen_decls}, key=len)
         if reach and not any(stack[:len(d)] == d for d in reach):
             out.append((name, n, stack, reach))
+        # Declarations of another type or signature (an overload, a variable typed per branch): for each, the use
+        # with every declaration of the other kinds left out, so it meets that one alone.
+        signatures = {sig for _, sig in seen_decls}
+        if len(signatures) > 1:
+            for sig in sorted(signatures):
+                others = sorted({st for st, other in seen_decls if other != sig}, key=len)
+                if not any(stack[:len(d)] == d for d in others):
+                    out.append((name, n, stack, others))
     return out
 
 

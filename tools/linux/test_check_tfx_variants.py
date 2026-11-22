@@ -555,6 +555,14 @@ class Declarations(unittest.TestCase):
             with self.subTest(decl=decl):
                 self.assertEqual(self.missing(glsl), [name])
 
+    def test_each_kind_of_declaration_meets_the_use_alone(self):
+        glsl = ("#if A == 1\nfloat g(float x) { return x; }\n#else\nfloat g(vec4 x) { return x.x; }\n#endif\n"
+                "void main()\n{\n#if B && C == 3\n\tfloat r = g(vec4(1.0));\n#endif\n}\n")
+        found = sorted((env for name, _, (env, _) in self.find(glsl) if name == "g" and env), key=lambda e: e["A"])
+        # g(float) alone: A = 1 (the call then fails to compile); g(vec4) alone: A != 1.
+        self.assertEqual([e["A"] for e in found], [0, 1])
+        self.assertTrue(all(e["B"] == 1 and e["C"] == 3 for e in found))
+
     def test_uses_through_define_bodies_follow_their_definition(self):
         glsl = ("#define USE (v + 1.0)\n"
                 "#if A == 1\n#define DROP { r = true; }\n#else\n#define DROP discard\n#endif\n"
@@ -599,9 +607,11 @@ class Declarations(unittest.TestCase):
         src = ctv.load()
         for stage in src.stages:
             self.assertEqual(stage.gave_up, [], stage.recipe.stage)
-        # gl_FragDepth is a builtin its redeclaration only qualifies: writing it without one compiles, which the
-        # compiler confirms on the variant this adds.
-        self.assertEqual([n for n, _, _ in src.stages[1].missing], ["gl_FragDepth"])
+        # gl_FragDepth is a builtin its redeclaration only qualifies: writing it without one compiles. RtSampler and
+        # DepthSampler are a texture2D or a subpassInput by branch: each kind meets its uses alone. The compiler
+        # confirms all of them on the variants this adds.
+        self.assertEqual(sorted({n for n, _, _ in src.stages[1].missing}),
+                         ["DepthSampler", "RtSampler", "gl_FragDepth"])
 
 
 class Lines(unittest.TestCase):
