@@ -9,6 +9,7 @@ import itertools
 import re
 import shutil
 import sys
+import tempfile
 import unittest
 from pathlib import Path
 
@@ -165,6 +166,35 @@ class ValueClasses(unittest.TestCase):
         u = self.uses("#ifndef M\n#define M 0\n#endif\n#if defined(M)\n#endif\n// M == 3\n/* M == 4 */\n", "M")["M"]
         self.assertEqual(u.atoms, set())
         self.assertEqual(ctv.value_classes([0, 1, 2], u), [0])
+
+    def test_hex_suffix_and_parentheses_are_read(self):
+        u = self.uses("#define K (0x4u)\n#if M == 0x10\n#elif (M) >= 2u\n#elif M < (K)\n#endif\n", "M")["M"]
+        self.assertEqual(u.atoms, {("==", 16), (">=", 2), ("<", 4)})
+        self.assertIn(16, ctv.value_classes(list(range(32)), u))
+
+    def test_unreadable_comparisons_stop(self):
+        for glsl in ("#if M == 8 * 2\n#endif\n",                          # an expression
+                     "#if M + 1 == 3\n#endif\n",
+                     "#define IS(x) (M == x)\n",                         # a function-like macro's parameter
+                     "#define K (8 << 1)\n#if M == K\n#endif\n",         # a constant that is an expression
+                     "#define ALIAS M\n",                                # an alias, compared who knows where
+                     "#if !M == 1\n#endif\n"):
+            with self.subTest(glsl=glsl), self.assertRaisesRegex(ctv.SourceError, r"tfx\.glsl:\d+: M is read as"):
+                self.uses(glsl, "M")
+
+    def test_truth_tests_in_every_position(self):
+        u = self.uses("#if M\n#elif !M && (M) || (M || X)\n#endif\n#define D (M && X)\n", "M")["M"]
+        self.assertEqual(u.atoms, {("!=", 0)})
+
+    def test_critic_repro_hex_value_is_compiled(self):
+        tfx = (ROOT / ctv.TFX).read_text().replace(
+            "#if PS_ZTST == ZTST_GEQUAL", "#if PS_ANISOTROPIC_FILTERING == 0x10\nkamite_bad = 1;\n#endif\n"
+            "#if PS_ZTST == ZTST_GEQUAL", 1)
+        with tempfile.TemporaryDirectory() as d:
+            (Path(d) / "tfx.glsl").write_text(tfx)
+            src = ctv.load(tfx_path=Path(d) / "tfx.glsl")
+        af = next(p for p in src.stages[1].params if p.name == "PS_ANISOTROPIC_FILTERING")
+        self.assertIn(16, af.values)
 
     def test_prefix_names_are_other_macros(self):
         u = self.uses("#if PS_ATST_NONE == 1\n#endif\n", "PS_ATST")["PS_ATST"]

@@ -325,42 +325,110 @@ class Uses:
     value: bool = False  # used as a number in code
 
 
+TOKEN = re.compile(r"0[xX][0-9a-fA-F]+[uU]?|\d+[uU]?|[A-Za-z_]\w*|==|!=|<=|>=|&&|\|\||<<|>>|\S")
+INT = re.compile(r"(?:0[xX][0-9a-fA-F]+|\d+)[uU]?")
+CMP = {"==", "!=", "<", "<=", ">", ">=", "&"}
+# What may stand next to a macro tested for truth, or next to a whole comparison: anything else (arithmetic, a
+# function-like macro's parameter, a cast) is a use this script cannot read.
+LEFT_OK = {None, "(", "!", "&&", "||"}
+RIGHT_OK = {None, ")", "&&", "||"}
+CODE_LEFT_OK = LEFT_OK | {"?", ":", ",", "=", "[", "{", "return"}
+CODE_RIGHT_OK = RIGHT_OK | {"?", ":", ",", ";", "]", "}"}
+
+
+def int_literal(token: str) -> int:
+    return int(token.rstrip("uU"), 16 if token[:2] in ("0x", "0X") else 10)
+
+
 def shader_constants(glsl: str) -> dict[str, int]:
-    return {k: int(v, 0) for k, v in re.findall(r"^\s*#\s*define\s+(\w+)\s+(-?(?:0x[0-9a-fA-F]+|\d+))u?\s*$", glsl, re.M)}
+    """`#define NAME 3`, `0x10`, `2u`, `(3)`: names standing for one integer."""
+    out = {}
+    for name, body in re.findall(r"^\s*#\s*define\s+(\w+)[ \t]+(.+?)\s*$", glsl, re.M):
+        m = re.fullmatch(r"\(?\s*((?:0[xX][0-9a-fA-F]+|\d+)[uU]?)\s*\)?", body)
+        if m:
+            out.setdefault(name, int_literal(m.group(1)))
+    return out
 
 
 def macro_uses(glsl: str, macros: set[str]) -> dict[str, Uses]:
+    """How tfx.glsl reads each macro: compared with integers, compared with another macro, tested for truth, or (in
+    code) used as a number. In a directive anything else is a SourceError: a comparison this script cannot evaluate
+    would otherwise merge values that compile differently."""
     text = strip_c_comments(glsl)
     consts = shader_constants(text)
     uses = {m: Uses(set()) for m in macros}
-    op = r"(==|!=|<=|>=|&(?!&)|<|>)"
-    for line in text.splitlines():
-        directive = line.lstrip().startswith("#")
-        if re.match(r"\s*#\s*(ifn?def|undef)\b", line):
+
+    def operand(toks, k):
+        """The integer, constant or macro at toks[k] (a parenthesised one too) and the index past it, else None."""
+        if k + 2 < len(toks) and toks[k] == "(" and toks[k + 2] == ")":
+            got = operand(toks, k + 1)
+            return (got[0], k + 3) if got else None
+        if 0 <= k < len(toks):
+            t = toks[k]
+            if INT.fullmatch(t):
+                return int_literal(t), k + 1
+            if t in macros:
+                return t, k + 1
+            if t in consts:
+                return consts[t], k + 1
+        return None
+
+    def operand_left(toks, k):
+        if k - 2 >= 0 and toks[k] == ")" and toks[k - 2] == "(":
+            got = operand_left(toks, k - 1)
+            return (got[0], k - 2) if got else None
+        got = operand(toks, k) if k >= 0 else None
+        return (got[0], k) if got else None
+
+    for n, line in enumerate(text.splitlines(), 1):
+        toks = TOKEN.findall(line)
+        directive = bool(toks) and toks[0] == "#"
+        if directive and len(toks) > 1 and toks[1] in ("ifdef", "ifndef", "undef"):
             continue
-        for m in re.finditer(r"\b[A-Z_][A-Z0-9_]*\b", line):
-            name = m.group(0)
-            if name not in uses:
+        for i, t in enumerate(toks):
+            if t not in uses:
                 continue
-            before, after = line[:m.start()], line[m.end():]
-            if re.search(r"#\s*define\s*$", before) or re.search(r"\bdefined\s*\(?\s*$", before):
+            if directive and toks[1:3] == ["define", t] and i == 2:
                 continue
-            right = re.match(rf"\s*{op}\s*(\w+)", after)
-            left = re.search(rf"(\w+)\s*{op}\s*$", before)
-            found = False
-            for side, mm in (("r", right), ("l", left)):
-                if not mm:
+            if toks[max(0, i - 2):i] in (["defined", "("],) or (i and toks[i - 1] == "defined"):
+                continue
+            lo, hi = i, i
+            while (lo > 0 and hi + 1 < len(toks) and toks[lo - 1] == "(" and toks[hi + 1] == ")"
+                   and (lo < 2 or not re.fullmatch(r"\w+", toks[lo - 2]) or toks[lo - 2] in ("if", "elif", "return"))):
+                lo, hi = lo - 1, hi + 1
+
+            def at(k):
+                if directive and k <= 1 or k < 0 or k >= len(toks):
+                    return None
+                return toks[k]
+            left_ok, right_ok = (LEFT_OK, RIGHT_OK) if directive else (CODE_LEFT_OK, CODE_RIGHT_OK)
+            use = uses[t]
+            right, left = at(hi + 1), at(lo - 1)
+            if right in CMP and left in left_ok and left != "!":
+                got = operand(toks, hi + 2)
+                if got and at(got[1]) in right_ok:
+                    if isinstance(got[0], str):
+                        use.exact = True
+                    else:
+                        use.atoms.add((right, got[0]))
                     continue
-                operator, operand = (mm.group(1), mm.group(2)) if side == "r" else (FLIP[mm.group(2)], mm.group(1))
-                if operand in uses:
-                    uses[name].exact = found = True
-                elif operand in consts or re.fullmatch(r"\d+", operand):
-                    uses[name].atoms.add((operator, consts.get(operand, int(operand) if operand.isdigit() else 0)))
-                    found = True
-            if not found:
-                uses[name].atoms.add(("!=", 0))
-                if not directive:
-                    uses[name].value = True
+            if left in CMP and right in right_ok:
+                got = operand_left(toks, lo - 2)
+                if got and at(got[1] - 1) in left_ok and at(got[1] - 1) != "!":
+                    if isinstance(got[0], str):
+                        use.exact = True
+                    else:
+                        use.atoms.add((FLIP[left], got[0]))
+                    continue
+            if left in LEFT_OK and right in RIGHT_OK:
+                use.atoms.add(("!=", 0))
+                continue
+            if directive:
+                raise SourceError(f"tfx.glsl:{n}: {t} is read as {line.strip()!r}, which "
+                                  f"{Path(__file__).name} cannot evaluate; compare it with an integer or a "
+                                  f"#define'd integer, or teach the script")
+            use.atoms.add(("!=", 0))
+            use.value = True
     return uses
 
 
