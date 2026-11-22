@@ -372,8 +372,19 @@ def parse_stages(cpp: str, stage_lines: dict[str, str] | None = None) -> list[St
 
 
 def check_shader_path(cpp: str) -> None:
-    if 'ReadShaderSource("shaders/vulkan/tfx.glsl")' not in cpp:
-        raise SourceError(f"{DEVICE_CPP} no longer reads shaders/vulkan/tfx.glsl into m_tfx_source")
+    """m_tfx_source is tfx.glsl as read, untouched: one block reads it and moves it in, and every other mention
+    streams it (ss << m_tfx_source;). Anything else (a prefix, an append) would change what the game compiles."""
+    block = (r'\{\s*std::optional<std::string> shader = ReadShaderSource\("shaders/vulkan/tfx\.glsl"\);\s*'
+             r'if \(!shader\.has_value\(\)\)\s*\{[^{}]*\breturn false;\s*\}\s*m_tfx_source = std::move\(\*shader\);'
+             r'\s*\}')
+    if len(re.findall(block, cpp)) != 1:
+        raise SourceError(f"{DEVICE_CPP}: the block reading shaders/vulkan/tfx.glsl into m_tfx_source "
+                          f"(m_tfx_source = std::move(*shader);) is not there once as {Path(__file__).name} knows it")
+    for m in re.finditer(r"[^\n;{}]*\bm_tfx_source\b[^\n;]*;?", cpp):
+        if m.group(0).strip() not in ("m_tfx_source = std::move(*shader);", "ss << m_tfx_source;"):
+            n = cpp.count("\n", 0, m.start()) + 1
+            raise SourceError(f"{DEVICE_CPP}:{n}: m_tfx_source is used as {m.group(0).strip()!r}; "
+                              f"teach {Path(__file__).name} what that does to the shader")
 
 
 def parse_enums(enums_h: str) -> dict[str, list[int] | SourceError]:

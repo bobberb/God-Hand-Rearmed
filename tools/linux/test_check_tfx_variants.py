@@ -406,6 +406,18 @@ static void AddShaderHeader(std::stringstream& ss)
         check = flake[flake.index("tfxVariants = pkgs.runCommand"):]
         self.assertIn("timeout 1800 python3", check[:check.index("'';")])
 
+    def test_the_shader_text_must_be_tfx_glsl_untouched(self):
+        cpp = ctv.strip_c_comments((ROOT / ctv.DEVICE_CPP).read_text())
+        ctv.check_shader_path(cpp)
+        move = "m_tfx_source = std::move(*shader);"
+        self.assertEqual(cpp.count(move), 1)
+        for bent in (cpp.replace(move, 'm_tfx_source = "#define PS_TFX 9\\n" + std::move(*shader);'),
+                     cpp.replace(move, move + '\n\t\tm_tfx_source += "\\n";'),
+                     cpp.replace('ReadShaderSource("shaders/vulkan/tfx.glsl")', 'ReadShaderSource("shaders/x.glsl")'),
+                     cpp.replace("ss << m_tfx_source;", "ss << m_tfx_source.substr(1);", 1)):
+            with self.assertRaises(ctv.SourceError):
+                ctv.check_shader_path(bent)
+
     def test_conditional_add_macro_stops(self):
         cpp = ctv.strip_c_comments((ROOT / ctv.DEVICE_CPP).read_text())
         self.assertEqual(len(ctv.parse_stages(cpp)), 2)
