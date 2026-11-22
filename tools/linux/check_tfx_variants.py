@@ -189,7 +189,8 @@ class HeaderLine:
 
 
 def parse_header(cpp: str) -> tuple[list[HeaderLine], set[str]]:
-    """AddShaderHeader: `ss << "...";` lines, each under the `if (...)` guarding it (one statement or a braced block)."""
+    """AddShaderHeader: `ss << "...";` lines, each under the `if (...)` guarding it (one statement or a braced
+    block)."""
     body, line0 = function_body(cpp, r"static void AddShaderHeader\(std::stringstream& ss\)")
     lines, features, guard_stack, pending = [], set(), [], None
     for n, raw in enumerate(body.splitlines(), line0):
@@ -244,7 +245,8 @@ def parse_add_macro(cpp: str) -> list[str]:
 def parse_stage_macros(cpp: str) -> dict[str, str]:
     """AddShaderStageMacro's line for each of its flags (vs, gs, fs): an if / else if chain, one `ss << "...";` under
     each flag. Any other statement (an unconditional line, a brace, a second line under a flag) is a SourceError."""
-    body, line0 = function_body(cpp, r"static void AddShaderStageMacro\(std::stringstream& ss, bool vs, bool gs, bool fs\)")
+    body, line0 = function_body(
+        cpp, r"static void AddShaderStageMacro\(std::stringstream& ss, bool vs, bool gs, bool fs\)")
     found, flag = {}, None
     for n, raw in enumerate(body.splitlines(), line0):
         s = raw.strip()
@@ -340,7 +342,7 @@ def parse_stages(cpp: str) -> list[StageRecipe]:
 
 
 def check_shader_path(cpp: str) -> None:
-    if 'ReadShaderSource("shaders/vulkan/tfx.glsl")' not in cpp or not TFX.endswith("shaders/vulkan/tfx.glsl"):
+    if 'ReadShaderSource("shaders/vulkan/tfx.glsl")' not in cpp:
         raise SourceError(f"{DEVICE_CPP} no longer reads shaders/vulkan/tfx.glsl into m_tfx_source")
 
 
@@ -618,8 +620,8 @@ def load(root: Path = ROOT, tfx_path: Path | None = None) -> Sources:
                                   f"which {recipe.selector} does not have")
             # One-parameter constraints narrow the domain first, so the classes (and a value-used macro's largest
             # value) come from values the game builds.
-            domain = [x for x in fields[m.field]
-                      if all(c.ok({m.name: x}) for c in CONSTRAINTS if c.stage == recipe.stage and c.params == (m.name,))]
+            own = [c for c in CONSTRAINTS if c.stage == recipe.stage and c.params == (m.name,)]
+            domain = [x for x in fields[m.field] if all(c.ok({m.name: x}) for c in own)]
             params.append(Param(m.name, tuple(value_classes(domain, uses[m.name]))))
         params += [Param(f, (0, 1)) for f in sorted(feature_names)]
         names = {p.name for p in params}
@@ -1042,7 +1044,8 @@ def covering(params: list[Param], groups: list[tuple[str, ...]], constraints: li
              extra: list[dict] = ()) -> tuple[list[dict[str, int]], list[tuple], list[tuple]]:
     """Rows (param -> value) holding every value of every param, every pair of values of every two params, and every
     triple of values of every three params in one group; and the tuples left out, those a constraint forbids and those
-    the greedy fill could not complete into an allowed row. Greedy and deterministic: a row starts from the first uncovered tuple (triples first) and fills the
+    the greedy fill could not complete into an allowed row. `extra`: assignments of any params, each to be held by
+    a row too. Greedy and deterministic: a row starts from the first uncovered tuple (longest first) and fills the
     other params, largest domains first, with the value completing the most uncovered tuples (ties: the smaller)."""
     names = [p.name for p in params]
     index = {n: i for i, n in enumerate(names)}
@@ -1108,7 +1111,8 @@ def covering(params: list[Param], groups: list[tuple[str, ...]], constraints: li
             cover([seed])
             unplaced.append(seed)
             continue
-        cover([(c, vals) for c in combos if open_vals[c] for vals in [tuple(row[m] for m in c)] if vals in open_vals[c]])
+        cover([(c, vals) for c in combos if open_vals[c]
+               for vals in [tuple(row[m] for m in c)] if vals in open_vals[c]])
         rows.append({n: row[n] for n in names})
     return rows, ruled_out, unplaced
 
@@ -1143,8 +1147,10 @@ def variants(src: Sources) -> tuple[list[Variant], dict[str, Stats]]:
 # Compiling.
 
 
-def compile_one(compiler: list[str], v: Variant) -> tuple[Variant, int, str]:
-    r = subprocess.run(compiler + [v.stage], input=v.source.encode(), capture_output=True)
+def compile_one(compiler: list[str], v: Variant, debug: bool = False) -> tuple[Variant, int, str]:
+    """debug: VKShaderCache's GSConfig.UseDebugDevice path (no optimisation, debug info), `tfxcc <stage> debug`."""
+    r = subprocess.run(compiler + [v.stage] + (["debug"] if debug else []), input=v.source.encode(),
+                       capture_output=True)
     return v, r.returncode, (r.stderr + r.stdout).decode(errors="replace")
 
 
@@ -1155,18 +1161,19 @@ PROBES = [  # (stage, source, exit code the compiler must give)
 ]
 
 
-def probe(compiler: list[str]) -> str | None:
-    """None if the compiler passes a good source and fails a bad one; else what went wrong. A compiler that always
-    exits 0 would otherwise pass every variant."""
-    for stage, source, want in PROBES:
-        v = Variant(stage, {}, source, 0)
-        try:
-            _, rc, msg = compile_one(compiler, v)
-        except OSError as e:
-            return f"cannot run {shlex.join(compiler)}: {e}"
-        if rc != want:
-            return (f"compiler probe: {shlex.join(compiler + [stage])} exited {rc} for a source that should give "
-                    f"{want}:\n{source}{msg}")
+def probe(compiler: list[str], modes: tuple[bool, ...] = (False,)) -> str | None:
+    """None if the compiler passes a good source and fails a bad one, in each mode (debug or not); else what went
+    wrong. A compiler that always exits 0 would otherwise pass every variant."""
+    for debug in modes:
+        for stage, source, want in PROBES:
+            v = Variant(stage, {}, source, 0)
+            try:
+                _, rc, msg = compile_one(compiler, v, debug)
+            except OSError as e:
+                return f"cannot run {shlex.join(compiler)}: {e}"
+            if rc != want:
+                cmd = shlex.join(compiler + [stage] + (["debug"] if debug else []))
+                return f"compiler probe: {cmd} exited {rc} for a source that should give {want}:\n{source}{msg}"
     return None
 
 
@@ -1178,7 +1185,10 @@ def tfx_lines(message: str, header_lines: int) -> str:
 
 def main(argv: list[str] | None = None) -> int:
     ap = argparse.ArgumentParser(description=__doc__.split("\n\n")[0])
-    ap.add_argument("--compiler", default="tfxcc", help="tfxcc, or any command taking vert|frag, the source on stdin, exit 0 = compiled")
+    ap.add_argument("--compiler", default="tfxcc",
+                    help="tfxcc, or any command taking vert|frag [debug], the source on stdin, exit 0 = compiled")
+    ap.add_argument("--debug", action="store_true",
+                    help="also compile every variant as with UseDebugDevice (no optimisation, debug info)")
     ap.add_argument("--tfx", type=Path, help=f"the shader to check instead of {TFX} (a scratch copy)")
     ap.add_argument("--root", type=Path, default=ROOT)
     ap.add_argument("--jobs", type=int, default=0, help="compiles at once (0: one per CPU)")
@@ -1190,7 +1200,7 @@ def main(argv: list[str] | None = None) -> int:
     start = time.monotonic()
     compiler = shlex.split(args.compiler)
     if not args.list:  # before the minutes of work, the seconds that make them mean something
-        problem = probe(compiler)
+        problem = probe(compiler, (False, True) if args.debug else (False,))
         if problem:
             print(f"check_tfx_variants: {problem}", file=sys.stderr)
             return 2
@@ -1224,12 +1234,13 @@ def main(argv: list[str] | None = None) -> int:
         return 0
 
     failed = []
+    jobs = [(v, False) for v in vs] + ([(v, True) for v in vs] if args.debug else [])
     with concurrent.futures.ThreadPoolExecutor(args.jobs) as pool:
-        for v, rc, msg in pool.map(lambda v: compile_one(compiler, v), vs):
+        for (v, debug), (_, rc, msg) in zip(jobs, pool.map(lambda j: compile_one(compiler, *j), jobs)):
             if rc != 0:
-                failed.append((v, rc, msg))
-    for v, rc, msg in failed:
-        print(f"FAIL {v.describe()}")
+                failed.append((v, debug, msg))
+    for v, debug, msg in failed:
+        print(f"FAIL{' (debug)' if debug else ''} {v.describe()}")
         for line in tfx_lines(msg, v.header_lines).strip().splitlines()[:12]:
             print(f"    {line}")
     unplaced = [(name, t) for name, st in stats.items() for t in st.unplaced]
@@ -1241,7 +1252,8 @@ def main(argv: list[str] | None = None) -> int:
         print(f"GAVE UP {stage}: could not tell whether {name} at tfx.glsl:{line} can be compiled without its "
               f"declaration; raise the search budget in {Path(__file__).name} or simplify the conditions")
     per_stage = ", ".join(f"{name} {sum(v.stage == name for v in vs)}" for name in stats)
-    print(f"tfx variants: {len(vs)} ({per_stage}), {len(failed)} failed; every pair of "
+    print(f"tfx variants: {len(vs)} ({per_stage}){', each also as debug' if args.debug else ''}, "
+          f"{len(failed)} failed; every pair of "
           f"{' / '.join(f'{len(st.params)} {st.recipe.stage}' for st in src.stages)} parameters and every triple in "
           f"{sum(len(st.groups) for st in src.stages)} #if groups, "
           f"{sum(len(st.missing) for st in src.stages)} uses without their declaration held, "

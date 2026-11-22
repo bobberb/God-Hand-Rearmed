@@ -150,11 +150,12 @@
           '';
 
           # tfx.glsl, the Vulkan renderer's main shader, in the variants tools/linux/check_tfx_variants.py derives from
-          # GSDeviceVK.cpp and the selector structs, compiled by the game's own shaderc build (nix/tfxcc.nix).
+          # GSDeviceVK.cpp and the selector structs, compiled by the game's own shaderc build (nix/tfxcc.nix), as a
+          # release build compiles them and again as with UseDebugDevice (--debug).
           # $out is the report without its "time:" line, so a --rebuild gives the same bytes.
           tfxVariants = pkgs.runCommand "ghr-tfx-variants" { nativeBuildInputs = [ pkgs.python3 tfxcc ]; } ''
             rc=0
-            python3 -I ${src}/tools/linux/check_tfx_variants.py --compiler tfxcc --jobs ''${NIX_BUILD_CORES:-0} \
+            python3 -I ${src}/tools/linux/check_tfx_variants.py --compiler tfxcc --debug --jobs ''${NIX_BUILD_CORES:-0} \
               > report.txt 2>&1 || rc=$?
             cat report.txt
             grep -v '^time: ' report.txt > $out

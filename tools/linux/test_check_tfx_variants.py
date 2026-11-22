@@ -98,8 +98,9 @@ class RealSources(unittest.TestCase):
         row = {p.name: p.values[0] for p in stage.params}
         row.update({"features.texture_barrier": 0, "features.UseFeedbackLoopLayout": 0, "features.rov": 0})
         text, hdr = ctv.assemble(self.src, stage, row)
-        self.assertTrue(text.startswith("#version 460 core\n#extension GL_EXT_samplerless_texture_functions : require\n"
-                                        "#define DISABLE_TEXTURE_BARRIER 1\n#define FRAGMENT_SHADER 1\n#define PS_FST 0\n"))
+        self.assertTrue(text.startswith(
+            "#version 460 core\n#extension GL_EXT_samplerless_texture_functions : require\n"
+            "#define DISABLE_TEXTURE_BARRIER 1\n#define FRAGMENT_SHADER 1\n#define PS_FST 0\n"))
         self.assertTrue(text.endswith(self.src.tfx))
         self.assertEqual(text[:len(text) - len(self.src.tfx)].count("\n"), hdr)
         self.assertEqual(hdr, 4 + len(stage.recipe.macros))
@@ -275,7 +276,8 @@ static void AddShaderHeader(std::stringstream& ss)
     def test_header_lines_and_their_guards(self):
         lines, features = ctv.parse_header(self.HEADER)
         self.assertEqual(features, {"features.a", "features.B"})
-        self.assertEqual([h.text for h in lines], ["#version 460 core\n", "#define NO_A 1\n", "#extension X : require\n",
+        self.assertEqual([h.text for h in lines], ["#version 460 core\n", "#define NO_A 1\n",
+                                                   "#extension X : require\n",
                                                    "#define AB 1\n"])
         F = {"features.a": True, "features.B": False}
         self.assertEqual([h.guard is None or eval(h.guard, {}, {"F": F}) for h in lines], [True, False, False, False])
@@ -358,7 +360,8 @@ static void AddShaderHeader(std::stringstream& ss)
 using E = GSShader::E;
 struct S { union { struct { u32 a : 2; E e : 2; u8 b : 1; }; struct { u64 key; }; }; };
 """
-        self.assertEqual(ctv.parse_selector(device_h, "S", {"E": [0, 1, 5]}), {"a": [0, 1, 2, 3], "e": [0, 1], "b": [0, 1]})
+        self.assertEqual(ctv.parse_selector(device_h, "S", {"E": [0, 1, 5]}),
+                         {"a": [0, 1, 2, 3], "e": [0, 1], "b": [0, 1]})
 
 
 class Declarations(unittest.TestCase):
@@ -526,6 +529,13 @@ class Covering(unittest.TestCase):
 OK_COMPILER = f"{SH} -c '! grep -q \"^#error\"' fake"  # compiles all but the probe's bad source
 
 
+class Style(unittest.TestCase):
+    def test_lines_fit_120_columns(self):
+        for path in (HERE / "check_tfx_variants.py", Path(__file__), HERE / "tfxcc" / "tfxcc.c"):
+            for n, line in enumerate(path.read_text().splitlines(), 1):
+                self.assertLessEqual(len(line), 120, f"{path.name}:{n}")
+
+
 class Report(unittest.TestCase):
     def test_line_numbers_also_as_tfx_lines(self):
         self.assertEqual(ctv.tfx_lines("source:120: error: 'bad' : undeclared\n", 70),
@@ -574,6 +584,24 @@ class Report(unittest.TestCase):
             with contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(err):
                 self.assertEqual(ctv.main(["--compiler", compiler]), 2, compiler)
             self.assertRegex(err.getvalue(), "compiler probe|cannot run")
+
+    @unittest.skipUnless(SH, "needs sh")
+    def test_debug_pass_compiles_every_variant_again(self):
+        # Fails the see-through variants only when called with "debug" (and the probe's #error source always).
+        fake = (f"{SH} -c 'src=$(cat); case \"$src\" in *\"#error\"*) exit 1;; esac; [ \"$2\" = debug ] && "
+                f"case \"$src\" in *\"#define PS_SEE_THROUGH 1\"*) exit 1;; esac; exit 0' fake")
+        out = io.StringIO()
+        with contextlib.redirect_stdout(out):
+            self.assertEqual(ctv.main(["--compiler", fake]), 0)
+        self.assertNotIn("FAIL", out.getvalue())
+        out = io.StringIO()
+        with contextlib.redirect_stdout(out):
+            self.assertEqual(ctv.main(["--compiler", fake, "--debug"]), 1)
+        fails = [line for line in out.getvalue().splitlines() if line.startswith("FAIL")]
+        vs, _ = ctv.variants(ctv.load())
+        self.assertEqual(len(fails), sum(bool(v.values.get("PS_SEE_THROUGH")) for v in vs))
+        self.assertTrue(all(f.startswith("FAIL (debug) frag ") for f in fails))
+        self.assertIn(", each also as debug, ", out.getvalue())
 
     @unittest.skipUnless(SH, "needs sh")
     def test_all_compiling_exit_0(self):
