@@ -91,6 +91,9 @@ class RealSources(unittest.TestCase):
         # largest compiled, the value an array sized by it sees.
         self.assertEqual(values["PS_ANISOTROPIC_FILTERING"], (0, 1, 2, 16))
         self.assertEqual(values["PS_DATE"], (0, 1, 2, 3, 5, 6))
+        self.assertEqual(values["PS_TFX"], (0, 1, 2, 3, 4))        # 3 bits, 0..4 built
+        self.assertEqual(max(values["PS_BLEND_HW"]), 6)            # 3 bits, HWBlendType up to 6
+        self.assertEqual(max(values["PS_BLEND_MIX"]), 2)           # 2 bits, 0..2 built
         self.assertFalse(any(v.values.get("PS_ANISOTROPIC_FILTERING", 0) > 16 for v in self.vs))
 
     def test_assembled_source_is_header_stage_macros_shader(self):

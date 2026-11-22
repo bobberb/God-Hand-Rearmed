@@ -57,6 +57,7 @@ ENUMS_H = "thirdparty/pcsx2/pcsx2/GS/Renderers/Common/GSShaderEnums.h"
 RENDERER_HW = "thirdparty/pcsx2/pcsx2/GS/Renderers/HW/GSRendererHW.cpp"
 TFX = "thirdparty/pcsx2-gs/resources/shaders/vulkan/tfx.glsl"
 BRIDGE = "thirdparty/pcsx2-gs/compat/Bridge.cpp"
+GSREGS = "thirdparty/pcsx2/pcsx2/GS/GSRegs.h"
 
 
 class SourceError(Exception):
@@ -109,6 +110,25 @@ CONSTRAINTS = [
                lambda v: v["PS_DATE"] not in (1, 2) or not v["PS_NO_COLOR"],
                "DATE 1 and 2 are the PrimID pass, which writes colour",
                ((DEVICE_CPP, r"pipe\.ps\.no_color = false;", 1),)),
+    # Selectors wider than their values (tfx is 3 bits, blend_hw 3, blend_mix 2). The other wide ones copy a register
+    # field of their own width (ALPHA.A..D, TEST.ZTST, SCANMSK, CLAMP, psm.fmt), use every value (pal_fmt,
+    # depth_fmt, process_*, dither), or their spare values already share class 0 (channel 7).
+    Constraint("frag", ("PS_TFX",),
+               lambda v: v["PS_TFX"] <= 4,
+               "tfx is TFX_DECAL, TEX0.TFX (2 bits) or 4 (TFX_NONE)",
+               ((RENDERER_HW, r"m_conf\.ps\.tfx = m_cached_ctx\.TEX0\.TFX;", 1),
+                (RENDERER_HW, r"m_conf\.ps\.tfx = 4;", 3),
+                (GSREGS, r"TFX_NONE\s+= 4,", 1))),
+    Constraint("frag", ("PS_BLEND_HW",),
+               lambda v: v["PS_BLEND_HW"] <= 6,
+               "blend_hw is a HWBlendType (at most INV_SRC_DST_BLEND_HALF = 6), here or through blend_multi_pass",
+               ((DEVICE_H, r"INV_SRC_DST_BLEND_HALF\s+= 6,", 1),
+                (DEVICE_CPP, r"pipe\.ps\.blend_hw = config\.blend_multi_pass\.blend_hw;", 1))),
+    Constraint("frag", ("PS_BLEND_MIX",),
+               lambda v: v["PS_BLEND_MIX"] <= 2,
+               "blend_mix is 1 or 2 (REV_SUBTRACT), or off",
+               ((RENDERER_HW, r"m_conf\.ps\.blend_mix = \(blend\.op == GSDevice::OP_REV_SUBTRACT\) \? 2 : 1;", 1),
+                (RENDERER_HW, r"m_conf\.ps\.blend_mix = false;", 1))),
     Constraint("frag", ("PS_DATE", "PS_NO_COLOR1", "PS_BLEND_A", "PS_BLEND_B", "PS_BLEND_C", "PS_BLEND_D"),
                lambda v: v["PS_DATE"] not in (1, 2) or (v["PS_NO_COLOR1"] and not (
                    v["PS_BLEND_A"] or v["PS_BLEND_B"] or v["PS_BLEND_C"] or v["PS_BLEND_D"])),
