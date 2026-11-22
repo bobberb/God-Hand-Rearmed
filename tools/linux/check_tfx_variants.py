@@ -570,6 +570,7 @@ class Stage:
     # ones whose search gave up.
     missing: list[tuple[str, int, dict]] = dataclasses.field(default_factory=list)
     gave_up: list[tuple[str, int]] = dataclasses.field(default_factory=list)
+    cond: "Conditions | None" = None
 
 
 @dataclasses.dataclass
@@ -654,7 +655,7 @@ def load(root: Path = ROOT, tfx_path: Path | None = None) -> Sources:
         others = {re.fullmatch(r"#define (\w+) .*\n", line).group(1) for line in stage_lines.values()} - {own}
         aliases = {m.name: m.feature for m in recipe.macros if m.feature}
         cond = Conditions(tfx, header, own, others, names, aliases)
-        stage = Stage(recipe, params, constraints, interaction_groups(cond))
+        stage = Stage(recipe, params, constraints, interaction_groups(cond), cond=cond)
         allowed = checker(params, constraints)
         for name, line, use, decls in use_without_declaration(cond):
             env, finished = find_missing_declaration(cond, use, decls, params, constraints, allowed)
@@ -1110,6 +1111,59 @@ class Stats:
     ruled_out: list[tuple]
     unplaced: list[tuple]
     duplicates: int
+    lines: int = 0  # lines of tfx.glsl this stage can compile (no #if around them is false for every variant)
+    held: int = 0  # of those, the ones some variant compiles
+    unbuildable: list[int] = dataclasses.field(default_factory=list)  # first lines of blocks no game build compiles
+    gave_up: list[int] = dataclasses.field(default_factory=list)  # first lines of blocks whose search gave up
+
+
+def complete(env: dict, params: list[Param], allowed: Callable[[dict, str], bool]) -> dict | None:
+    """env with every other param set to its first allowed value, or None if the constraints leave none."""
+    row = dict(env)
+    for p in params:
+        if p.name in row:
+            continue
+        for v in p.values:
+            row[p.name] = v
+            if allowed(row, p.name):
+                break
+        else:
+            return None
+    return {p.name: row[p.name] for p in params}
+
+
+def hold_every_line(stage: Stage, rows: list[dict]) -> tuple[list[dict], int, int, list[int], list[int], list]:
+    """Rows to add so every line of tfx.glsl the stage can compile is compiled by some row: for each block (a
+    distinct stack of #if conditions) no row compiles, the search finds parameter values compiling it, or proves no
+    game build does. Returns the rows, the lines that can be compiled, those held, the first line of each unbuildable
+    block, of each block whose search gave up, and the values the fill could not complete."""
+    cond = stage.cond
+    live = [(n, stack) for n, stack, line in cond.lines if line.strip() and cond.stack_value(stack, {}) != 0]
+    first: dict[tuple, int] = {}
+    for n, stack in live:
+        first.setdefault(stack, n)
+    open_stacks = set(first)
+    for row in rows:
+        memo: dict = {}
+        open_stacks = {st for st in open_stacks if cond.stack_value(st, row, memo) != 1}
+    allowed = checker(stage.params, stage.constraints)
+    added, unbuildable, gave_up, unplaced = [], [], [], []
+    for stack in sorted(open_stacks, key=first.get):
+        if any(cond.stack_value(stack, row) == 1 for row in added):
+            continue
+        env, finished = find_missing_declaration(cond, stack, [], stage.params, stage.constraints, allowed)
+        if env is None:
+            (unbuildable if finished else gave_up).append(first[stack])
+            continue
+        row = complete(env, stage.params, allowed)
+        if row is None:
+            unplaced.append(((tuple(env)), tuple(env.values())))
+        else:
+            added.append(row)
+    held_stacks = set(first) - set(open_stacks)
+    held_stacks |= {st for st in open_stacks if any(cond.stack_value(st, row) == 1 for row in added)}
+    held = sum(stack in held_stacks for _, stack in live)
+    return added, len(live), held, unbuildable, gave_up, unplaced
 
 
 def variants(src: Sources) -> tuple[list[Variant], dict[str, Stats]]:
@@ -1118,6 +1172,9 @@ def variants(src: Sources) -> tuple[list[Variant], dict[str, Stats]]:
     for stage in src.stages:
         rows, ruled_out, unplaced = covering(stage.params, stage.groups, stage.constraints,
                                              [env for _, _, env in stage.missing])
+        added, lines, held, unbuildable, gave_up, unfilled = hold_every_line(stage, rows)
+        rows += added
+        unplaced += unfilled
         seen, dupes = set(), 0
         for row in rows:
             text, hdr = assemble(src, stage, row)
@@ -1126,7 +1183,8 @@ def variants(src: Sources) -> tuple[list[Variant], dict[str, Stats]]:
                 continue
             seen.add(text)
             out.append(Variant(stage.recipe.stage, row, text, hdr))
-        stats[stage.recipe.stage] = Stats(len(rows), ruled_out, unplaced, dupes)
+        stats[stage.recipe.stage] = Stats(len(rows), ruled_out, unplaced, dupes, lines, held, unbuildable,
+                                          gave_up)
     return out, stats
 
 
@@ -1234,16 +1292,21 @@ def main(argv: list[str] | None = None) -> int:
     for name, (combo, vals) in unplaced:
         print(f"UNPLACED {name}: no variant holds {' '.join(f'{n}={v}' for n, v in zip(combo, vals))}; "
               f"a constraint missing from {Path(__file__).name}, or the fill needs to backtrack")
-    gave_up = [(st.recipe.stage, name, line) for st in src.stages for name, line in st.gave_up]
-    for stage, name, line in gave_up:
-        print(f"GAVE UP {stage}: could not tell whether {name} at tfx.glsl:{line} can be compiled without its "
-              f"declaration; raise the search budget in {Path(__file__).name} or simplify the conditions")
+    gave_up = [f"{st.recipe.stage}: could not tell whether {name} at tfx.glsl:{line} can be compiled without its "
+               f"declaration" for st in src.stages for name, line in st.gave_up]
+    gave_up += [f"{name}: could not tell whether any game build compiles the block at tfx.glsl:{line}"
+                for name, st in stats.items() for line in st.gave_up]
+    for text in gave_up:
+        print(f"GAVE UP {text}; raise the search budget in {Path(__file__).name} or simplify the conditions")
     per_stage = ", ".join(f"{name} {sum(v.stage == name for v in vs)}" for name in stats)
     print(f"tfx variants: {len(vs)} ({per_stage}){', each also as debug' if args.debug else ''}, "
           f"{len(failed)} failed; every pair of "
           f"{' / '.join(f'{len(st.params)} {st.recipe.stage}' for st in src.stages)} parameters and every triple in "
           f"{sum(len(st.groups) for st in src.stages)} #if groups, "
           f"{sum(len(st.missing) for st in src.stages)} uses without their declaration held, "
+          f"lines held: {', '.join(f'{name} {st.held}/{st.lines}' for name, st in stats.items())}"
+          f"{''.join(f' ({name}: {len(st.unbuildable)} blocks no game build compiles, from tfx.glsl:'
+                     f'{st.unbuildable[0]})' for name, st in stats.items() if st.unbuildable)}, "
           f"{sum(len(st.ruled_out) for st in stats.values())} combinations ruled out by {len(CONSTRAINTS)} constraints")
     # Last, and the only line that differs between runs of the same sources (the Nix check keeps it out of $out).
     print(f"time: {args.jobs} jobs, {time.monotonic() - start:.1f}s")

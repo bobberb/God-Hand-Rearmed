@@ -172,6 +172,24 @@ class RealSources(unittest.TestCase):
         want = {"features.texture_barrier", "features.UseFeedbackLoopLayout", "PS_ROV_COLOR", "PS_FBMASK", "PS_ZTST"}
         self.assertTrue(any(want <= g for g in groups))
 
+    def test_every_buildable_line_is_compiled_by_a_variant(self):
+        for name, stage in self.stage.items():
+            cond, rows = stage.cond, [v.values for v in self.vs if v.stage == name]
+            stats = self.stats[name]
+            live = [(n, st) for n, st, line in cond.lines if line.strip() and cond.stack_value(st, {}) != 0]
+            unheld = [n for n, st in live if not any(cond.stack_value(st, r) == 1 for r in rows)]
+            self.assertEqual(unheld, [], name)
+            self.assertEqual((stats.lines, stats.held, stats.unbuildable, stats.gave_up),
+                             (len(live), len(live), [], []))
+        # The critic's two: the 16-bit colour rounding without blending or dither, and shuffle across with RG = BA = 3.
+        frag = [v.values for v in self.vs if v.stage == "frag"]
+        self.assertTrue(any(v["PS_DST_FMT"] == 2 and v["PS_DITHER"] != 3 and v["PS_BLEND_MIX"] == 0
+                            and v["PS_BLEND_HW"] == 0 and not (v["PS_BLEND_A"] or v["PS_BLEND_B"] or v["PS_BLEND_D"])
+                            and v["PS_DITHER"] in (0, 3) and not v["PS_FBMASK"] for v in frag))
+        self.assertTrue(any(v["PS_SHUFFLE"] and v["PS_SHUFFLE_ACROSS"] and v["PS_PROCESS_BA"] == 3
+                            and v["PS_PROCESS_RG"] == 3 and not v["PS_SHUFFLE_SAME"] and not v["PS_READ16_SRC"]
+                            for v in frag))
+
     def test_variant_sources_are_distinct(self):
         self.assertEqual(len({v.source for v in self.vs}), len(self.vs))
 
@@ -475,6 +493,26 @@ class Declarations(unittest.TestCase):
         self.assertEqual([n for n, _, _ in src.stages[1].missing], ["gl_FragDepth"])
 
 
+class Lines(unittest.TestCase):
+    PARAMS = [ctv.Param("A", (0, 1, 2)), ctv.Param("B", (0, 1))]
+    GLSL = "#if A == 2 && B\nx;\n#endif\n#if A == 1 && !B\ny;\n#endif\nz;\n"
+
+    def stage(self, constraints=()):
+        cond = ctv.Conditions(self.GLSL, [], "FRAGMENT_SHADER", set(), {"A", "B"})
+        recipe = ctv.StageRecipe("frag", "f", "PSSelector", "", [])
+        return ctv.Stage(recipe, self.PARAMS, list(constraints), [], cond=cond)
+
+    def test_a_block_no_row_compiles_gets_one(self):
+        added, lines, held, unbuildable, gave_up, unplaced = ctv.hold_every_line(self.stage(), [{"A": 0, "B": 0}])
+        self.assertEqual(added, [{"A": 2, "B": 1}, {"A": 1, "B": 0}])
+        self.assertEqual((lines, held, unbuildable, gave_up, unplaced), (3, 3, [], [], []))
+
+    def test_a_block_the_constraints_forbid_is_proven_unbuildable(self):
+        never = ctv.Constraint("frag", ("A", "B"), lambda v: not (v["A"] == 2 and v["B"]), "t", ())
+        added, lines, held, unbuildable, _, _ = ctv.hold_every_line(self.stage([never]), [{"A": 1, "B": 0}])
+        self.assertEqual((added, lines, held, unbuildable), ([], 3, 2, [2]))
+
+
 class Groups(unittest.TestCase):
     @staticmethod
     def groups(glsl, header=(), names=frozenset({"A", "B", "C", "D", "features.barrier"}), aliases=None):
@@ -593,6 +631,7 @@ class Report(unittest.TestCase):
         self.assertTrue(all(f.startswith("FAIL frag ") and "PS_SEE_THROUGH=1" in f for f in fails))
         self.assertRegex(out.getvalue().splitlines()[-2],
                          rf"^tfx variants: {len(vs)} \(vert \d+, frag \d+\), {len(want)} failed; ")
+        self.assertRegex(out.getvalue().splitlines()[-2], r"lines held: vert (\d+)/\1, frag (\d+)/\2, ")
 
     @unittest.skipUnless(SH, "needs sh")
     def test_report_is_the_same_bytes_but_for_the_time_line(self):
