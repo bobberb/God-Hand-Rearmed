@@ -54,6 +54,7 @@
             buildInputs = libsFor pkgs;
             nativeBuildInputs = toolsFor pkgs;
           } // args);
+          tfxcc = import ./nix/tfxcc.nix { inherit pkgs lib deps; };
           portable = ghr { portable = true; };
           native = ghr { portable = false; buildTests = true; };
           runtime = runtimeFor pkgs;
@@ -148,6 +149,13 @@
             touch $out
           '';
 
+          # tfx.glsl, the Vulkan renderer's main shader, in the variants tools/linux/check_tfx_variants.py derives from
+          # GSDeviceVK.cpp and the selector structs, compiled by the game's own shaderc build (nix/tfxcc.nix).
+          tfxVariants = pkgs.runCommand "ghr-tfx-variants" { nativeBuildInputs = [ pkgs.python3 tfxcc ]; } ''
+            set -o pipefail
+            python3 -I ${src}/tools/linux/check_tfx_variants.py --compiler tfxcc --jobs ''${NIX_BUILD_CORES:-0} | tee $out
+          '';
+
           # GHR's own binaries must need nothing newer than glibc 2.31 and no library the package lacks.
           portableCheck = pkgs.runCommand "ghr-portable-check" { nativeBuildInputs = [ pkgs.python3 ]; } ''
             cd ${src}
@@ -160,7 +168,7 @@
         in
         {
           packages = {
-            inherit portable native;
+            inherit portable native tfxcc;
             linux-stub = linuxStub;
             appimage-runtime = runtime;
             default = linuxStub;
@@ -173,6 +181,7 @@
             window-errors = windowErrors;
             packaging-tests = packagingTests;
             portable-binary = portableCheck;
+            tfx-variants = tfxVariants;
           };
           apps.package = {
             type = "app";

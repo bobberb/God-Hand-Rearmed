@@ -105,6 +105,7 @@ launcher, renderer, platform code) is compiled, linked and started, and the arti
 | `launcher-smoke` | the tar.gz's GHR opens its launcher on a 1280x800 virtual screen and draws it (`tools/linux/smoke_launcher.py`) |
 | `launcher-glibc-2-31` | the same on a 2020 userland (nixos-20.09: glibc 2.31, its X11 and Mesa 20.1), the oldest system the package claims |
 | `window-errors` | no display, and an X server without GLX: GHR ends with exit code 1 and says why, instead of crashing |
+| `tfx-variants` | the Vulkan renderer's `tfx.glsl` compiles, with the game's shaderc (`nix/tfxcc.nix`), in the variants `tools/linux/check_tfx_variants.py` derives from `GSDeviceVK.cpp`: every pair of selector values, every triple within one `#if`; `--tfx` checks a scratch copy |
 
 Run them all locally with `nix flake check -L`, one with `nix build .#checks.x86_64-linux.<name> -L`.
 
