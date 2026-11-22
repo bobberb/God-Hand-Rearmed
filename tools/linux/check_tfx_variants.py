@@ -57,8 +57,9 @@ class SourceError(Exception):
 
 
 # ---------------------------------------------------------------------------------------------------------------------
-# Constraints: combinations the game never builds. `anchor` is a regex that must match exactly one line of `path`
-# (test_check_tfx_variants.py checks it), so the file:line printed stays right when the file moves.
+# Constraints: combinations the game never builds. Each cites the code that rules the combination out: (path, regex,
+# n) must match exactly n lines of path (test_check_tfx_variants.py checks it), so the file:line printed stays right
+# when the file moves and a citation goes stale loudly.
 
 
 @dataclasses.dataclass(frozen=True)
@@ -67,44 +68,53 @@ class Constraint:
     params: tuple[str, ...]
     ok: Callable[[dict], bool]
     why: str
-    path: str
-    anchor: str
+    cites: tuple[tuple[str, str, int], ...]
 
 
 CONSTRAINTS = [
     Constraint("frag", ("PS_ROV_COLOR", "PS_ROV_DEPTH", "features.rov"),
                lambda v: not (v["PS_ROV_COLOR"] or v["PS_ROV_DEPTH"]) or v["features.rov"],
                "ROVs only on a device with ROV support (the header's interlock extensions come with it)",
-               RENDERER_HW, r"if \(!\(GSConfig\.HWROV && features\.rov\)\)"),
+               ((RENDERER_HW, r"if \(!\(GSConfig\.HWROV && features\.rov\)\)", 1),)),
     Constraint("frag", ("PS_ROV_COLOR", "PS_NO_COLOR1"),
                lambda v: not v["PS_ROV_COLOR"] or v["PS_NO_COLOR1"],
-               "colour ROV blends in the shader and drops the dual-source output",
-               RENDERER_HW, r"// We should never need dual source with SW blend"),
+               "colour ROV blends in the shader and drops the dual-source output; with blending off the pipeline "
+               "drops it too",
+               ((RENDERER_HW, r"// We should never need dual source with SW blend", 1),
+                (DEVICE_CPP, r"pps\.no_color1 = true;", 1))),
     Constraint("frag", ("PS_NO_COLOR", "PS_NO_COLOR1"),
                lambda v: not v["PS_NO_COLOR"] or v["PS_NO_COLOR1"],
                "no colour output means no second colour output either",
-               DEVICE_H, r"no_color = no_color1 = 1;"),
+               ((DEVICE_H, r"no_color = no_color1 = 1;", 1),)),
     Constraint("frag", ("PS_DATE",),
                lambda v: v["PS_DATE"] in (0, 1, 2, 3, 5, 6),
-               "DATE is 1 + DATM (PrimID), 5 + DATM (barrier) or 3 (after the PrimID pass); DATM is one bit",
-               RENDERER_HW, r"m_conf\.ps\.date = 1 \+ m_cached_ctx\.TEST\.DATM;"),
+               "DATE is 1 + DATM (PrimID), 5 + DATM (barrier, stencil one, ROV) or 3 (after the PrimID pass); DATM "
+               "is one bit",
+               ((RENDERER_HW, r"m_conf\.ps\.date = 1 \+ m_cached_ctx\.TEST\.DATM;", 1),
+                (RENDERER_HW, r"m_conf\.ps\.date = 5 \+ m_cached_ctx\.TEST\.DATM;", 3),
+                (DEVICE_CPP, r"^\tconfig\.ps\.date = 3;", 1))),
     Constraint("frag", ("PS_ANISOTROPIC_FILTERING",),
                lambda v: v["PS_ANISOTROPIC_FILTERING"] <= 16,
                "sw_aniso is GSConfig.MaxAnisotropy or 0, and the launcher's option is clamped to 0..16",
-               BRIDGE, r"options\.MaxAnisotropy = static_cast<u8>\(std::clamp\(value, 0, 16\)\);"),
+               ((RENDERER_HW, r"m_conf\.ps\.sw_aniso = anisotropic \? GSConfig\.MaxAnisotropy : 0;", 1),
+                (BRIDGE, r"options\.MaxAnisotropy = static_cast<u8>\(std::clamp\(value, 0, 16\)\);", 1))),
     Constraint("frag", ("PS_DATE", "PS_NO_COLOR"),
                lambda v: v["PS_DATE"] not in (1, 2) or not v["PS_NO_COLOR"],
                "DATE 1 and 2 are the PrimID pass, which writes colour",
-               DEVICE_CPP, r"pipe\.ps\.no_color = false;"),
+               ((DEVICE_CPP, r"pipe\.ps\.no_color = false;", 1),)),
 ]
 
 
 def cite(c: Constraint, root: Path = ROOT) -> str:
-    lines = (root / c.path).read_text().splitlines()
-    hits = [i + 1 for i, line in enumerate(lines) if re.search(c.anchor, line)]
-    if len(hits) != 1:
-        raise SourceError(f"constraint anchor {c.anchor!r} matches {len(hits)} lines of {c.path}, want 1")
-    return f"{c.path}:{hits[0]}"
+    """Every line the constraint cites, as path:line."""
+    out = []
+    for path, anchor, want in c.cites:
+        lines = (root / path).read_text().splitlines()
+        hits = [i + 1 for i, line in enumerate(lines) if re.search(anchor, line)]
+        if len(hits) != want:
+            raise SourceError(f"constraint citation {anchor!r} matches {len(hits)} lines of {path}, want {want}")
+        out += [f"{path}:{n}" for n in hits]
+    return ", ".join(out)
 
 
 # ---------------------------------------------------------------------------------------------------------------------

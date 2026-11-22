@@ -142,10 +142,27 @@ class RealSources(unittest.TestCase):
     def test_variant_sources_are_distinct(self):
         self.assertEqual(len({v.source for v in self.vs}), len(self.vs))
 
-    def test_constraint_citations_point_at_one_line(self):
+    def test_constraint_citations_point_at_their_lines(self):
         for c in ctv.CONSTRAINTS:
-            path, line = ctv.cite(c).rsplit(":", 1)
-            self.assertRegex((ROOT / path).read_text().splitlines()[int(line) - 1], c.anchor)
+            self.assertTrue(c.cites, c.why)
+            places = ctv.cite(c).split(", ")
+            self.assertEqual(len(places), sum(n for _, _, n in c.cites))
+            for place in places:
+                path, line = place.rsplit(":", 1)
+                text = (ROOT / path).read_text().splitlines()[int(line) - 1]
+                self.assertTrue(any(p == path and re.search(a, text) for p, a, _ in c.cites), place)
+
+    def test_citations_named_in_the_critique(self):
+        cited = {c.params: ctv.cite(c) for c in ctv.CONSTRAINTS}
+        self.assertIn(f"{ctv.DEVICE_CPP}:5148", cited[("PS_ROV_COLOR", "PS_NO_COLOR1")])
+        for line in (f"{ctv.RENDERER_HW}:6771", f"{ctv.RENDERER_HW}:6779", f"{ctv.RENDERER_HW}:8404",
+                     f"{ctv.DEVICE_CPP}:6154"):
+            self.assertIn(line, cited[("PS_DATE",)])
+
+    def test_a_stale_citation_stops(self):
+        c = dataclasses.replace(ctv.CONSTRAINTS[0], cites=((ctv.DEVICE_CPP, r"pipe\.ps\.no_color", 1),))
+        with self.assertRaisesRegex(ctv.SourceError, r"matches [02-9]\d* lines of .*, want 1"):
+            ctv.cite(c)
 
 
 class ValueClasses(unittest.TestCase):
@@ -344,8 +361,8 @@ class Groups(unittest.TestCase):
 
 class Covering(unittest.TestCase):
     PARAMS = [ctv.Param("A", (0, 1, 2)), ctv.Param("B", (0, 1)), ctv.Param("C", (0, 1)), ctv.Param("D", (0, 1, 2, 3))]
-    CONS = [ctv.Constraint("frag", ("A", "B", "C"), lambda v: not (v["A"] == 2 and v["B"]) or v["C"], "x", "", ""),
-            ctv.Constraint("frag", ("C", "D"), lambda v: not (v["C"] and v["D"] == 3), "y", "", "")]
+    CONS = [ctv.Constraint("frag", ("A", "B", "C"), lambda v: not (v["A"] == 2 and v["B"]) or v["C"], "x", ()),
+            ctv.Constraint("frag", ("C", "D"), lambda v: not (v["C"] and v["D"] == 3), "y", ())]
 
     def test_pairs_triples_constraints(self):
         rows, ruled_out, unplaced = ctv.covering(self.PARAMS, [("A", "B", "D")], self.CONS)
