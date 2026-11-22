@@ -912,7 +912,10 @@ class Tidy(unittest.TestCase):
         doc = ctv.__doc__
         self.assertIn("Arithmetic over selectors in a directive keeps every value", doc)
         self.assertIn("exact as far as the preprocessor is modelled", doc)
-        row = next(x for x in (ROOT / "docs/BUILDING.md").read_text().splitlines() if x.startswith("| `tfx-variants`"))
+        building = ROOT / "docs/BUILDING.md"
+        if not building.exists():  # the Nix checks' source set has no docs/
+            self.skipTest("no docs/BUILDING.md in this tree")
+        row = next(x for x in building.read_text().splitlines() if x.startswith("| `tfx-variants`"))
         self.assertIn("arithmetic over selectors in a `#if` keeps every value", row)
         self.assertIn("what that model does not cover stops the check", row)
 
