@@ -63,6 +63,14 @@ class RealSources(unittest.TestCase):
         self.assertEqual(values["features.rov"], (0, 1))
         self.assertEqual(dict((p.name, p.values) for p in self.stage["vert"].params)["VS_EXPAND"], tuple(range(6)))
 
+    def test_one_parameter_constraints_narrow_the_domain(self):
+        values = {p.name: p.values for p in self.stage["frag"].params}
+        # sw_aniso is 5 bits, but the game builds 0..16 (Bridge.cpp clamps MaxAnisotropy): 16, not 31, is the
+        # largest compiled, the value an array sized by it sees.
+        self.assertEqual(values["PS_ANISOTROPIC_FILTERING"], (0, 1, 2, 16))
+        self.assertEqual(values["PS_DATE"], (0, 1, 2, 3, 5, 6))
+        self.assertFalse(any(v.values.get("PS_ANISOTROPIC_FILTERING", 0) > 16 for v in self.vs))
+
     def test_assembled_source_is_header_stage_macros_shader(self):
         stage = self.stage["frag"]
         row = {p.name: p.values[0] for p in stage.params}

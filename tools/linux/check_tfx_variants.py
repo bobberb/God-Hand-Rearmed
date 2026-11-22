@@ -49,6 +49,7 @@ DEVICE_H = "thirdparty/pcsx2/pcsx2/GS/Renderers/Common/GSDevice.h"
 ENUMS_H = "thirdparty/pcsx2/pcsx2/GS/Renderers/Common/GSShaderEnums.h"
 RENDERER_HW = "thirdparty/pcsx2/pcsx2/GS/Renderers/HW/GSRendererHW.cpp"
 TFX = "thirdparty/pcsx2-gs/resources/shaders/vulkan/tfx.glsl"
+BRIDGE = "thirdparty/pcsx2-gs/compat/Bridge.cpp"
 
 
 class SourceError(Exception):
@@ -87,6 +88,10 @@ CONSTRAINTS = [
                lambda v: v["PS_DATE"] in (0, 1, 2, 3, 5, 6),
                "DATE is 1 + DATM (PrimID), 5 + DATM (barrier) or 3 (after the PrimID pass); DATM is one bit",
                RENDERER_HW, r"m_conf\.ps\.date = 1 \+ m_cached_ctx\.TEST\.DATM;"),
+    Constraint("frag", ("PS_ANISOTROPIC_FILTERING",),
+               lambda v: v["PS_ANISOTROPIC_FILTERING"] <= 16,
+               "sw_aniso is GSConfig.MaxAnisotropy or 0, and the launcher's option is clamped to 0..16",
+               BRIDGE, r"options\.MaxAnisotropy = static_cast<u8>\(std::clamp\(value, 0, 16\)\);"),
     Constraint("frag", ("PS_DATE", "PS_NO_COLOR"),
                lambda v: v["PS_DATE"] not in (1, 2) or not v["PS_NO_COLOR"],
                "DATE 1 and 2 are the PrimID pass, which writes colour",
@@ -558,7 +563,11 @@ def load(root: Path = ROOT, tfx_path: Path | None = None) -> Sources:
             if m.field not in fields:
                 raise SourceError(f"{DEVICE_CPP}:{m.line}: {m.name} is set from sel.{m.field}, "
                                   f"which {recipe.selector} does not have")
-            params.append(Param(m.name, tuple(value_classes(fields[m.field], uses[m.name]))))
+            # One-parameter constraints narrow the domain first, so the classes (and a value-used macro's largest
+            # value) come from values the game builds.
+            domain = [x for x in fields[m.field]
+                      if all(c.ok({m.name: x}) for c in CONSTRAINTS if c.stage == recipe.stage and c.params == (m.name,))]
+            params.append(Param(m.name, tuple(value_classes(domain, uses[m.name]))))
         params += [Param(f, (0, 1)) for f in sorted(feature_names)]
         names = {p.name for p in params}
         constraints = [c for c in CONSTRAINTS if c.stage == recipe.stage]
