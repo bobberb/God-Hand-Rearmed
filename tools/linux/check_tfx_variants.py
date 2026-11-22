@@ -342,6 +342,12 @@ def parse_stages(cpp: str, stage_lines: dict[str, str] | None = None) -> list[St
                 stage_line = stage_lines[flags[0]] if flags else ""
             elif mm := re.fullmatch(r'AddMacro\(ss, "(\w+)", (.+)\);', s):
                 field, feature = parse_macro_arg(mm.group(2), where)
+                twice = [m for m in macros if m.name == mm.group(1)]
+                if twice:
+                    # A second #define of a name with another value is shaderc's "Macro redefined" error on every
+                    # variant where the values differ; with the same value it is dead code. Neither is meant.
+                    raise SourceError(f"{where}: {function} adds {mm.group(1)} again (first at {DEVICE_CPP}:"
+                                      f"{twice[0].line})")
                 macros.append(Macro(mm.group(1), field, feature, n))
                 steps.append("macro")
             elif s == "ss << m_tfx_source;":
@@ -1145,6 +1151,8 @@ def covering(params: list[Param], groups: list[tuple[str, ...]], constraints: li
     a row too. Greedy and deterministic: a row starts from the first uncovered tuple (longest first) and fills the
     other params, largest domains first, with the value completing the most uncovered tuples (ties: the smaller)."""
     names = [p.name for p in params]
+    if len(set(names)) != len(names):
+        raise SourceError(f"covering: a parameter named twice in {names}")
     index = {n: i for i, n in enumerate(names)}
     values = {p.name: p.values for p in params}
     allowed = checker(params, constraints)
@@ -1210,6 +1218,8 @@ def covering(params: list[Param], groups: list[tuple[str, ...]], constraints: li
             continue
         cover([(c, vals) for c in combos if open_vals[c]
                for vals in [tuple(row[m] for m in c)] if vals in open_vals[c]])
+        if seed in uncovered:  # the row does not hold its own seed: this loop would never end
+            raise SourceError(f"covering made no progress on {dict(zip(*seed))} (a parameter named twice?)")
         rows.append({n: row[n] for n in names})
     return rows, ruled_out, unplaced
 

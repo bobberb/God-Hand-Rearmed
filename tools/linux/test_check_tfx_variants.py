@@ -11,6 +11,7 @@ import re
 import shutil
 import sys
 import tempfile
+import threading
 import unittest
 from pathlib import Path
 
@@ -361,6 +362,49 @@ static void AddShaderHeader(std::stringstream& ss)
                      cpp.replace("else if (gs)", "if (gs)", 1)):                          # not one chain
             with self.assertRaisesRegex(ctv.SourceError, "AddShaderStageMacro"):
                 ctv.parse_stage_macros(bent)
+
+    def test_a_name_added_twice_stops(self):
+        cpp = ctv.strip_c_comments((ROOT / ctv.DEVICE_CPP).read_text())
+        one = '\tAddMacro(ss, "PS_FST", sel.fst);\n'
+        self.assertEqual(cpp.count(one), 1)
+        for again in ('\tAddMacro(ss, "PS_FST", sel.wms);\n', one):  # another value, the same one
+            with self.assertRaisesRegex(ctv.SourceError, r"GetTFXFragmentShader adds PS_FST again \(first at"):
+                ctv.parse_stages(cpp.replace(one, one + again, 1))
+
+    @staticmethod
+    def covering_within(seconds, *args):
+        """covering(*args) in a thread: without the guards it loops for ever. Its SourceError text, or why not."""
+        result = []
+
+        def run():
+            try:
+                ctv.covering(*args)
+                result.append("returned")
+            except ctv.SourceError as e:
+                result.append(str(e))
+        worker = threading.Thread(target=run, daemon=True)
+        worker.start()
+        worker.join(seconds)
+        return result[0] if result else f"still running after {seconds}s"
+
+    def test_covering_that_cannot_progress_stops(self):
+        twice = [ctv.Param("A", (0, 1)), ctv.Param("A", (0, 1))]
+        self.assertIn("named twice", self.covering_within(10, twice, [], []))
+        # The guard itself: a constraint checker that lets a row through which then holds nothing of its seed.
+        params = [ctv.Param("A", (0, 1)), ctv.Param("B", (0, 1))]
+        real = ctv.checker
+        try:
+            ctv.checker = lambda ps, cs: (lambda row, changed: (row.__setitem__(changed, 1 - row[changed]) or True)
+                                          if changed == "B" and len(row) == 2 else True)
+            got = self.covering_within(10, params, [], [])
+        finally:
+            ctv.checker = real
+        self.assertIn("no progress", got)
+
+    def test_the_nix_check_has_a_time_limit(self):
+        flake = (ROOT / "flake.nix").read_text()
+        check = flake[flake.index("tfxVariants = pkgs.runCommand"):]
+        self.assertIn("timeout 1800 python3", check[:check.index("'';")])
 
     def test_conditional_add_macro_stops(self):
         cpp = ctv.strip_c_comments((ROOT / ctv.DEVICE_CPP).read_text())

@@ -155,9 +155,10 @@
           # $out is the report without its "time:" line, so a --rebuild gives the same bytes.
           tfxVariants = pkgs.runCommand "ghr-tfx-variants" { nativeBuildInputs = [ pkgs.python3 tfxcc ]; } ''
             rc=0
-            python3 -I ${src}/tools/linux/check_tfx_variants.py --compiler tfxcc --debug --jobs ''${NIX_BUILD_CORES:-0} \
-              > report.txt 2>&1 || rc=$?
+            timeout 1800 python3 -I ${src}/tools/linux/check_tfx_variants.py --compiler tfxcc --debug \
+              --jobs ''${NIX_BUILD_CORES:-0} > report.txt 2>&1 || rc=$?
             cat report.txt
+            [ $rc -ne 124 ] || echo "tfx-variants: no result after 30 minutes (it takes under a minute); stopped"
             grep -v '^time: ' report.txt > $out
             exit $rc
           '';
