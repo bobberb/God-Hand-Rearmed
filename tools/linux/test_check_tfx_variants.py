@@ -263,6 +263,19 @@ static void AddShaderHeader(std::stringstream& ss)
             with self.assertRaises(ctv.SourceError):
                 ctv.parse_add_macro(bent)
 
+    def test_stage_macro_lines(self):
+        cpp = ctv.strip_c_comments((ROOT / ctv.DEVICE_CPP).read_text())
+        self.assertEqual(ctv.parse_stage_macros(cpp), {"vs": "#define VERTEX_SHADER 1\n",
+                                                       "gs": "#define GEOMETRY_SHADER 1\n",
+                                                       "fs": "#define FRAGMENT_SHADER 1\n"})
+        first = '\tif (vs)\n\t\tss << "#define VERTEX_SHADER 1\\n";'
+        self.assertIn(first, cpp)
+        for bent in (cpp.replace(first, '\tss << "#define ANY_STAGE 1\\n";\n' + first),   # unconditional
+                     cpp.replace(first, first + '\n\t\tss << "#define AGAIN 1\\n";'),      # a second line
+                     cpp.replace("else if (gs)", "if (gs)", 1)):                          # not one chain
+            with self.assertRaisesRegex(ctv.SourceError, "AddShaderStageMacro"):
+                ctv.parse_stage_macros(bent)
+
     def test_conditional_add_macro_stops(self):
         cpp = ctv.strip_c_comments((ROOT / ctv.DEVICE_CPP).read_text())
         self.assertEqual(len(ctv.parse_stages(cpp)), 2)

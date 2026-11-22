@@ -213,12 +213,27 @@ def parse_add_macro(cpp: str) -> list[str]:
 
 
 def parse_stage_macros(cpp: str) -> dict[str, str]:
-    """AddShaderStageMacro's line for each of its flags (vs, gs, fs)."""
-    body, _ = function_body(cpp, r"static void AddShaderStageMacro\(std::stringstream& ss, bool vs, bool gs, bool fs\)")
-    found = dict(re.findall(r'if \((\w+)\)\s*ss << "((?:\\.|[^"\\])*)";', body))
-    if set(found) != {"vs", "gs", "fs"}:
+    """AddShaderStageMacro's line for each of its flags (vs, gs, fs): an if / else if chain, one `ss << "...";` under
+    each flag. Any other statement (an unconditional line, a brace, a second line under a flag) is a SourceError."""
+    body, line0 = function_body(cpp, r"static void AddShaderStageMacro\(std::stringstream& ss, bool vs, bool gs, bool fs\)")
+    found, flag = {}, None
+    for n, raw in enumerate(body.splitlines(), line0):
+        s = raw.strip()
+        if not s:
+            continue
+        m = re.fullmatch(r"(else )?if \((vs|gs|fs)\)", s)
+        if m and flag is None and bool(m.group(1)) == bool(found) and m.group(2) not in found:
+            flag = m.group(2)
+            continue
+        m = re.fullmatch(r'ss << "((?:\\.|[^"\\])*)";', s)
+        if m and flag is not None:
+            found[flag], flag = c_string(m.group(1)), None
+            continue
+        raise SourceError(f"{DEVICE_CPP}:{n}: AddShaderStageMacro statement {s!r} is not understood; "
+                          f"teach {Path(__file__).name}")
+    if set(found) != {"vs", "gs", "fs"} or flag is not None:
         raise SourceError(f"AddShaderStageMacro: want lines for vs, gs, fs, found {sorted(found)}")
-    return {k: c_string(v) for k, v in found.items()}
+    return found
 
 
 @dataclasses.dataclass
