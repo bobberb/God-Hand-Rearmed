@@ -790,9 +790,14 @@ ARITH = {"|": lambda a, b: a | b, "^": lambda a, b: a ^ b, "&": lambda a, b: a &
 
 
 class Conditions:
-    """tfx.glsl's #if / #elif / #else structure for one stage: each line's stack of block conditions, resolved once
-    (the shader's own macros inlined, the header's as guards over device features, anything else a number), and a
-    three-valued evaluator of them: 1, 0, or None while it depends on parameters not set yet."""
+    """tfx.glsl's #if / #elif / #else structure for one stage: each line's stack of block conditions, and a
+    three-valued evaluator of them: 1, 0, or None while it depends on parameters not set yet.
+
+    A condition is resolved where it stands, as the preprocessor reads it there: a parameter stays a parameter; any
+    other macro becomes the #define / #undef seen last before that line whose own #if stack is compiled (guarded
+    alternatives, nested: ("sel", stack, this one, else the one before)), its body resolved the same way; none of
+    them means undefined, 0. The header's lines are definitions before the first line (under their feature guard),
+    and so is the stage's macro."""
 
     def __init__(self, glsl: str, header: list[HeaderLine], stage_macro: str, other_stage_macros: set[str],
                  names: set[str], aliases: dict[str, str] | None = None):
@@ -801,24 +806,18 @@ class Conditions:
         self.aliases = aliases or {}
         self.stage_macro, self.other_stage_macros = stage_macro, other_stage_macros
         text = strip_c_comments(glsl)
-        self.defines: dict[str, set[str]] = {}
-        for m in re.finditer(r"^\s*#\s*define\s+([A-Za-z_]\w*)(\(?)[ \t]*(.*?)\s*$", text, re.M):
-            self.defines.setdefault(m.group(1), set()).add("(" if m.group(2) else m.group(3))
-        # Header macros: name -> (as defined(name), as name): a feature guard over 1 and over the macro's value.
-        self.header: dict[str, tuple[tuple, tuple]] = {}
+        # name -> [(where, condition it is under, "define" / "undef", body or None for a function-like macro)]
+        self.events: dict[str, list[tuple[str, tuple, str, str | None]]] = {}
+        self._count = 0  # events so far: what a cached resolution depends on
+        self._chains: dict[tuple, tuple] = {}
+        self._reads: dict[int, frozenset] = {}
         for h in header:
             m = re.fullmatch(r"#define (\w+)(?:[ \t]+(.*?))?\s*", h.text)
             if m:
-                value = (("num", int_literal(m.group(2))) if m.group(2) and INT.fullmatch(m.group(2)) else
-                         ("unreadable", m.group(1), m.group(2) or ""))
-                if not h.guard:
-                    self.header[m.group(1)] = (("num", 1), value)
-                    continue
-                guard = (compile(h.guard.strip(), "guard", "eval"),
-                         tuple(sorted(set(re.findall(r'F\["([\w.]+)"\]', h.guard)))))
-                self.header[m.group(1)] = (("guard", *guard, ("num", 1)), ("guard", *guard, value))
-        self._bodies: dict[str, tuple] = {}
-        self._reads: dict[int, frozenset] = {}
+                guard = (("feat", compile(h.guard.strip(), "guard", "eval"),
+                          tuple(sorted(set(re.findall(r'F\["([\w.]+)"\]', h.guard))))) if h.guard else ("num", 1))
+                self._event(m.group(1), "the header", guard, "define", m.group(2) or "")
+        self._event(stage_macro, "the stage line", ("num", 1), "define", "1")
         self.lines: list[tuple[int, tuple, str]] = []  # (line number, condition stack, line)
         stack: list[tuple[tuple, list]] = []  # (this branch's condition, the conditions before it in its chain)
         for n, line in enumerate(text.splitlines(), 1):
@@ -847,48 +846,66 @@ class Conditions:
                     else:
                         stack[-1] = (none_before, before)
                 continue
-            self.lines.append((n, tuple(c for c, _ in stack), line))
+            here = tuple(c for c, _ in stack)
+            m = re.match(r"\s*#\s*(define|undef)\s+([A-Za-z_]\w*)(\()?[ \t]*(.*?)\s*$", line)
+            if m:
+                under = ("num", 1)
+                for c in here:
+                    under = c if under == ("num", 1) else ("bin", "&&", under, c)
+                self._event(m.group(2), where, under, m.group(1), None if m.group(3) else m.group(4))
+            self.lines.append((n, here, line))
         if stack:
             raise SourceError("tfx.glsl: #if without #endif")
 
+    def _event(self, name, where, under, kind, body):
+        self.events.setdefault(name, []).append((where, under, kind, body))
+        self._count += 1
+
     def resolve(self, node, seen: frozenset = frozenset()) -> tuple:
-        """`node` with every name replaced: a parameter stays ("id", name); a shader macro becomes its body, a header
-        macro its guard, the stage's macro 1, anything else 0 (as the preprocessor reads an unknown name)."""
+        """`node` with every name replaced as the preprocessor would read it at this point of tfx.glsl."""
         kind = node[0]
         if kind == "num":
             return node
         if kind == "defined":
-            name = node[1]
-            if name in self.names or name in self.aliases:  # the game defines every AddMacro name
+            if node[1] in self.names or node[1] in self.aliases:  # the game defines every AddMacro name
                 return ("num", 1)
-            if name in self.header:
-                return self.header[name][0]
-            return ("num", int(name == self.stage_macro))
+            return self._chain(node[1], "defined", seen)
         if kind == "id":
-            name = node[1]
-            if name in self.names:
+            if node[1] in self.names:
                 return node
-            if name in self.aliases:
-                return ("id", self.aliases[name])
-            if name in self.header:
-                value = self.header[name][1]
-                if value[0] == "unreadable" or value[0] == "guard" and value[3][0] == "unreadable":
-                    raise SourceError(f"tfx.glsl reads the header's {name} as a number, but the header defines it as "
-                                      f"{(value[2] if value[0] == 'unreadable' else value[3][2])!r}")
-                return value
-            if name == self.stage_macro:
-                return ("num", 1)
-            if name in self.defines and name not in seen and name not in self.other_stage_macros:
-                if name not in self._bodies:
-                    bodies = self.defines[name]
-                    if len(bodies) != 1 or "(" in bodies:
-                        raise SourceError(f"tfx.glsl: {name} is used in a condition but has {len(bodies)} "
-                                          f"definitions or takes arguments; teach {Path(__file__).name}")
-                    tree = parse_condition(TOKEN.findall(next(iter(bodies))), f"tfx.glsl: #define {name}")
-                    self._bodies[name] = self.resolve(tree, seen | {name})
-                return self._bodies[name]
-            return ("num", 0)
+            if node[1] in self.aliases:
+                return ("id", self.aliases[node[1]])
+            return self._chain(node[1], "value", seen)
         return (kind, node[1], *(self.resolve(x, seen) for x in node[2:]))
+
+    def _chain(self, name: str, mode: str, seen: frozenset) -> tuple:
+        """What `name` is now (mode "defined": whether it is defined): the last definition or #undef in effect."""
+        key = (name, mode, self._count, name in seen)
+        if key in self._chains:
+            return self._chains[key]
+        out: tuple = ("num", 0)
+        for where, under, kind, body in self.events.get(name, ()):
+            if kind == "undef":
+                alt = ("num", 0)
+            elif mode == "defined":
+                alt = ("num", 1)
+            elif name in seen:  # the macro inside its own body: not expanded again
+                alt = ("num", 0)
+            elif where == "the header" and not INT.fullmatch(body):
+                raise SourceError(f"tfx.glsl reads the header's {name} as a number, but the header defines it as "
+                                  f"{body!r}")
+            elif body is None:
+                raise SourceError(f"tfx.glsl: {name} (defined at {where}) takes arguments and is read in a condition; "
+                                  f"teach {Path(__file__).name}")
+            else:
+                try:
+                    alt = self.resolve(parse_condition(TOKEN.findall(body), f"{where}: #define {name}"),
+                                       seen | {name})
+                except SourceError as e:
+                    raise SourceError(f"{e} (read in a condition through {name})") from None
+            out = alt if under == ("num", 1) else ("sel", under, alt, out)
+        self._chains[key] = out
+        return out
 
     def value(self, node, env: dict, memo: dict):
         """The integer `node` is with the parameters in env, None if that depends on others. memo: {} per env."""
@@ -900,9 +917,16 @@ class Conditions:
             out = node[1]
         elif kind == "id":
             out = env.get(node[1])
-        elif kind == "guard":  # ("guard", code, features, value): value where the guard holds, else 0
+        elif kind == "feat":  # ("feat", code, features): a header line's guard
             out = (None if any(f not in env for f in node[2]) else
-                   self.value(node[3], env, memo) if eval(node[1], {"__builtins__": {}}, {"F": env}) else 0)
+                   int(bool(eval(node[1], {"__builtins__": {}}, {"F": env}))))
+        elif kind == "sel":  # ("sel", under, this, otherwise)
+            c = self.value(node[1], env, memo)
+            if c is None:
+                a, b = self.value(node[2], env, memo), self.value(node[3], env, memo)
+                out = a if a == b else None
+            else:
+                out = self.value(node[2] if c else node[3], env, memo)
         elif kind == "un":
             x = self.value(node[2], env, memo)
             out = None if x is None else {"!": int(not x), "~": ~x, "-": -x, "+": x}[node[1]]
@@ -920,23 +944,28 @@ class Conditions:
         memo[key] = out
         return out
 
+    @staticmethod
+    def _children(node) -> tuple:
+        return node[1:] if node[0] == "sel" else node[2:] if node[0] in ("un", "bin") else ()
+
     def reads(self, node) -> frozenset:
         """The parameters `node` can depend on."""
         key = id(node)
         if key not in self._reads:
             kind = node[0]
-            self._reads[key] = (frozenset() if kind == "num" else frozenset({node[1]}) if kind == "id" else
-                                frozenset(node[2]) if kind == "guard" else
-                                frozenset().union(*(self.reads(x) for x in node[2:])))
+            self._reads[key] = (frozenset({node[1]}) if kind == "id" else frozenset(node[2]) if kind == "feat" else
+                                frozenset().union(*(self.reads(x) for x in self._children(node))))
         return self._reads[key]
 
     def open_reads(self, node, env: dict, memo: dict) -> set[str]:
         """The unset parameters that can still change `node`: those of its undecided parts only."""
         if self.value(node, env, memo) is not None:
             return set()
-        if node[0] in ("id", "guard"):
+        if node[0] in ("id", "feat"):
             return set(self.reads(node)) - env.keys()
-        return set().union(*(self.open_reads(x, env, memo) for x in node[2:]))
+        if node[0] == "sel" and self.value(node[1], env, memo) is not None:
+            return self.open_reads(node[2] if self.value(node[1], env, memo) else node[3], env, memo)
+        return set().union(*(self.open_reads(x, env, memo) for x in self._children(node)))
 
     def stack_value(self, stack: tuple, env: dict, memo: dict | None = None):
         """1 if every block in the stack is compiled, 0 if one is not, None if that depends on unset parameters."""

@@ -614,6 +614,73 @@ class Declarations(unittest.TestCase):
                          ["DepthSampler", "RtSampler", "gl_FragDepth"])
 
 
+class ShaderMacros(unittest.TestCase):
+    """tfx.glsl's own #define / #undef, read in line order under their own #if."""
+
+    @staticmethod
+    def values(glsl, line, *envs):
+        cond = ctv.Conditions(glsl, [], "FRAGMENT_SHADER", {"VERTEX_SHADER"}, {"A", "B"})
+        stack = next(st for _, st, text in cond.lines if text == line)
+        return [cond.stack_value(stack, env) for env in envs]
+
+    def test_defined_after_its_define_not_before(self):
+        glsl = ("#ifdef K\nbefore;\n#endif\n#define K 1\n#ifdef K\nafter;\n#endif\n"
+                "#ifndef K\nnot;\n#else\nelse;\n#endif\n")
+        self.assertEqual(self.values(glsl, "before;", {}), [0])
+        self.assertEqual(self.values(glsl, "after;", {}), [1])
+        self.assertEqual(self.values(glsl, "not;", {}), [0])
+        self.assertEqual(self.values(glsl, "else;", {}), [1])
+
+    def test_undef(self):
+        glsl = "#define K 1\n#undef K\n#if !K && !defined(K)\nx;\n#endif\n#define K 2\n#if K == 2\ny;\n#endif\n"
+        self.assertEqual(self.values(glsl, "x;", {}), [1])
+        self.assertEqual(self.values(glsl, "y;", {}), [1])
+
+    def test_defined_under_a_condition(self):
+        glsl = ("#if A == 1\n#define F 1\n#endif\n#if F && B\nw;\n#endif\n#ifdef F\nv;\n#endif\n"
+                "#if B\n#undef F\n#endif\n#ifdef F\nu;\n#endif\n")
+        self.assertEqual(self.values(glsl, "w;", {"A": 1, "B": 1}, {"A": 0, "B": 1}, {"B": 1}), [1, 0, None])
+        self.assertEqual(self.values(glsl, "v;", {"A": 1}, {"A": 2}), [1, 0])
+        self.assertEqual(self.values(glsl, "u;", {"A": 1, "B": 0}, {"A": 1, "B": 1}, {"A": 0, "B": 0}), [1, 0, 0])
+
+    def test_one_name_two_definitions_by_branch(self):
+        glsl = "#if A\n#define G 1\n#else\n#define G 0\n#endif\n#if G\nu;\n#endif\n"
+        self.assertEqual(self.values(glsl, "u;", {"A": 1}, {"A": 0}, {}), [1, 0, None])
+
+    def test_groups_and_lines_follow_the_definition(self):
+        glsl = "#if A == 2\n#define F 1\n#endif\n#if F && B\nw;\n#endif\n"
+        cond = ctv.Conditions(glsl, [], "FRAGMENT_SHADER", set(), {"A", "B"})
+        stack = next(st for _, st, text in cond.lines if text == "w;")
+        self.assertEqual(set().union(*(cond.reads(c) for c in stack)), {"A", "B"})
+        recipe = ctv.StageRecipe("frag", "f", "PSSelector", "", [])
+        stage = ctv.Stage(recipe, [ctv.Param("A", (0, 1, 2)), ctv.Param("B", (0, 1))], [], [], cond=cond)
+        added, lines, held, unbuildable, _, _ = ctv.hold_every_line(stage, [{"A": 0, "B": 1}])
+        # The #define line itself (A == 2) and w (A == 2, B) are each compiled by a row now.
+        self.assertIn({"A": 2, "B": 1}, added)
+        self.assertEqual((held, unbuildable), (lines, []))
+
+    def test_critic_repro_a_flag_defined_under_fog_is_compiled(self):
+        base = (ROOT / ctv.TFX).read_text()
+        main, anchor = "void main()\n{\n#if PS_SEE_THROUGH\n", "#if PS_ZTST == ZTST_GEQUAL"
+        tfx = base.replace(main, "#if PS_FOG\n#define KAMITE_FOGGY 1\n#endif\n" + main, 1).replace(
+            anchor, "#if KAMITE_FOGGY && PS_CHANNEL_FETCH == 5 && PS_BLEND_HW == 6 && PS_DITHER == 2\n"
+                    "\tint kamite_bad = vec4(1.0);\n#endif\n" + anchor, 1)
+        with tempfile.TemporaryDirectory() as d:
+            (Path(d) / "tfx.glsl").write_text(tfx)
+            src = ctv.load(tfx_path=Path(d) / "tfx.glsl")
+        vs, _ = ctv.variants(src)
+        frag = src.stages[1]
+        stack = next(st for _, st, text in frag.cond.lines if "kamite_bad" in text)
+        holding = [v.values for v in vs if v.stage == "frag" and frag.cond.stack_value(stack, v.values) == 1]
+        self.assertTrue(holding)
+        self.assertTrue(all(v["PS_FOG"] == 1 and v["PS_CHANNEL_FETCH"] == 5 for v in holding))
+
+    def test_a_function_like_or_unreadable_macro_in_a_condition_stops(self):
+        for glsl in ("#define F(x) (x)\n#if F\n#endif\n", "#define D { a = 1; }\n#if D\n#endif\n"):
+            with self.subTest(glsl=glsl), self.assertRaises(ctv.SourceError):
+                ctv.Conditions(glsl, [], "FRAGMENT_SHADER", set(), {"A"})
+
+
 class Lines(unittest.TestCase):
     PARAMS = [ctv.Param("A", (0, 1, 2)), ctv.Param("B", (0, 1))]
     GLSL = "#if A == 2 && B\nx;\n#endif\n#if A == 1 && !B\ny;\n#endif\nz;\n"
