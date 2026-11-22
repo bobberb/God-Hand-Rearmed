@@ -393,6 +393,9 @@ class Covering(unittest.TestCase):
                          ctv.covering(self.PARAMS, [("A", "B", "D")], self.CONS))
 
 
+OK_COMPILER = f"{SH} -c '! grep -q \"^#error\"' fake"  # compiles all but the probe's bad source
+
+
 class Report(unittest.TestCase):
     def test_line_numbers_also_as_tfx_lines(self):
         self.assertEqual(ctv.tfx_lines("source:120: error: 'bad' : undeclared\n", 70),
@@ -401,7 +404,7 @@ class Report(unittest.TestCase):
     @unittest.skipUnless(SH, "needs sh")
     def test_failing_variants_named_and_exit_1(self):
         # A stand-in compiler that fails exactly the variants with the see-through oval on.
-        fake = f"{SH} -c '! grep -q \"^#define PS_SEE_THROUGH 1$\"' fake"
+        fake = f"{SH} -c '! grep -q -e \"^#define PS_SEE_THROUGH 1$\" -e \"^#error\"' fake"
         out = io.StringIO()
         with contextlib.redirect_stdout(out):
             rc = ctv.main(["--compiler", fake])
@@ -421,7 +424,7 @@ class Report(unittest.TestCase):
         for jobs in ("1", "7"):
             out = io.StringIO()
             with contextlib.redirect_stdout(out):
-                ctv.main(["--compiler", f"{SH} -c 'cat > /dev/null' fake", "--jobs", jobs])
+                ctv.main(["--compiler", OK_COMPILER, "--jobs", jobs])
             lines = out.getvalue().splitlines()
             self.assertRegex(lines[-1], r"^time: \d+ jobs, [\d.]+s$")
             self.assertFalse(any(line.startswith("time: ") for line in lines[:-1]))
@@ -434,10 +437,19 @@ class Report(unittest.TestCase):
         self.assertNotIn("tee $out", check)
 
     @unittest.skipUnless(SH, "needs sh")
+    def test_a_compiler_that_cannot_fail_or_cannot_pass_stops(self):
+        for compiler in (f"{SH} -c 'cat > /dev/null' fake", f"{SH} -c 'cat > /dev/null; exit 1' fake",
+                         "/nonexistent/tfxcc"):
+            err = io.StringIO()
+            with contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(err):
+                self.assertEqual(ctv.main(["--compiler", compiler]), 2, compiler)
+            self.assertRegex(err.getvalue(), "compiler probe|cannot run")
+
+    @unittest.skipUnless(SH, "needs sh")
     def test_all_compiling_exit_0(self):
         out = io.StringIO()
         with contextlib.redirect_stdout(out):
-            self.assertEqual(ctv.main(["--compiler", f"{SH} -c 'cat > /dev/null' fake"]), 0)
+            self.assertEqual(ctv.main(["--compiler", OK_COMPILER]), 0)
         self.assertNotIn("FAIL", out.getvalue())
 
 

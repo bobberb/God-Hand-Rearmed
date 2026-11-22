@@ -773,6 +773,28 @@ def compile_one(compiler: list[str], v: Variant) -> tuple[Variant, int, str]:
     return v, r.returncode, (r.stderr + r.stdout).decode(errors="replace")
 
 
+PROBES = [  # (stage, source, exit code the compiler must give)
+    ("vert", "#version 460 core\nvoid main() { gl_Position = vec4(0.0); }\n", 0),
+    ("frag", "#version 460 core\nlayout(location = 0) out vec4 o;\nvoid main() { o = vec4(1.0); }\n", 0),
+    ("frag", "#version 460 core\n#error check_tfx_variants probe: this source must not compile\nvoid main() {}\n", 1),
+]
+
+
+def probe(compiler: list[str]) -> str | None:
+    """None if the compiler passes a good source and fails a bad one; else what went wrong. A compiler that always
+    exits 0 would otherwise pass every variant."""
+    for stage, source, want in PROBES:
+        v = Variant(stage, {}, source, 0)
+        try:
+            _, rc, msg = compile_one(compiler, v)
+        except OSError as e:
+            return f"cannot run {shlex.join(compiler)}: {e}"
+        if rc != want:
+            return (f"compiler probe: {shlex.join(compiler + [stage])} exited {rc} for a source that should give "
+                    f"{want}:\n{source}{msg}")
+    return None
+
+
 def tfx_lines(message: str, header_lines: int) -> str:
     """`source:123:` (a line of the assembled source) also as the tfx.glsl line."""
     return re.sub(r"\bsource:(\d+):", lambda m: f"source:{m.group(1)} (tfx.glsl:{int(m.group(1)) - header_lines}):",
@@ -819,6 +841,10 @@ def main(argv: list[str] | None = None) -> int:
         return 0
 
     compiler = shlex.split(args.compiler)
+    problem = probe(compiler)
+    if problem:
+        print(f"check_tfx_variants: {problem}", file=sys.stderr)
+        return 2
     failed = []
     with concurrent.futures.ThreadPoolExecutor(args.jobs) as pool:
         for v, rc, msg in pool.map(lambda v: compile_one(compiler, v), vs):
