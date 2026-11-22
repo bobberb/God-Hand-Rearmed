@@ -30,7 +30,7 @@ jobs:
           extra_nix_config: |
             experimental-features = nix-command flakes
             accept-flake-config = false
-      - name: Gates (unit + renderer tests, packaging tests, portable binary, launcher smoke, glibc 2.31, window errors)
+      - name: Gates (unit + renderer tests, packaging tests, portable binary, launcher smoke, glibc 2.31, window errors, tfx shader variants)
         run: nix flake check -L
       - name: Package (AppImage + tar.gz on the stand-in game code)
         run: |
