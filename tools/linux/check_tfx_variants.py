@@ -14,8 +14,8 @@ Everything is read from the sources, nothing is listed by hand:
     `dev->X()`) is 0 or 1.
   - which of those values differ: every place tfx.glsl compares the macro with a constant (==, !=, <, <=, >, >=, &,
     or a bare test, which is != 0). Values giving the same answer to all of them are one class and the smallest is
-    compiled. A macro compared with another macro keeps all its values; one used as a number in code also keeps its
-    largest.
+    compiled. A macro compared with another macro keeps all its values; one used in code other than in a comparison
+    (int(M), f(M), if (M)) also keeps its largest.
 
 Coverage rule, per stage (vert, frag), over the parameters (selector macros and device features):
   - every value class of every parameter, and every pair of classes of every two parameters;
@@ -525,7 +525,8 @@ def macro_uses(glsl: str, macros: set[str]) -> dict[str, Uses]:
                     else:
                         use.atoms.add((FLIP[left], got[0]))
                     continue
-            if left in LEFT_OK and right in RIGHT_OK:
+            # A truth test only in a directive: in code, int(M), f(M) or if (M) all see the number.
+            if directive and left in LEFT_OK and right in RIGHT_OK:
                 use.atoms.add(("!=", 0))
                 continue
             if directive:

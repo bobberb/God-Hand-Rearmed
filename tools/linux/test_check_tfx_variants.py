@@ -244,6 +244,14 @@ class ValueClasses(unittest.TestCase):
         self.assertEqual(u.atoms, set())
         self.assertEqual(ctv.value_classes([0, 1, 2], u), [0])
 
+    def test_in_code_a_bare_use_is_a_number(self):
+        for code in ("float x = int(M);\n", "x = f(M);\n", "if (M) x = 1;\n", "x = (M);\n"):
+            with self.subTest(code=code):
+                u = self.uses(code, "M")["M"]
+                self.assertTrue(u.value)
+                self.assertEqual(ctv.value_classes(list(range(8)), u), [0, 1, 7])
+        self.assertFalse(self.uses("x = (M == 2) ? 1 : 0;\n", "M")["M"].value)
+
     def test_hex_suffix_and_parentheses_are_read(self):
         u = self.uses("#define K (0x4u)\n#if M == 0x10\n#elif (M) >= 2u\n#elif M < (K)\n#endif\n", "M")["M"]
         self.assertEqual(u.atoms, {("==", 16), (">=", 2), ("<", 4)})
