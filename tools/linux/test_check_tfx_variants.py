@@ -4,6 +4,7 @@ classes, the covering array, the source assembly, the report. No shader compiler
     python -I -m unittest discover -s tools/linux -p "test_*.py" -v
 """
 import contextlib
+import dataclasses
 import io
 import itertools
 import re
@@ -237,6 +238,30 @@ static void AddShaderHeader(std::stringstream& ss)
         self.assertEqual(ctv.parse_macro_arg("static_cast<int>(m_features.pvl)", "x"), (None, "features.pvl"))
         with self.assertRaises(ctv.SourceError):
             ctv.parse_macro_arg("sel.tme && GSConfig.X", "x")
+
+    ADD_MACRO = 'ss << "#define " << name << " " << value << "\\n";'
+
+    def test_macro_lines_follow_the_add_macro_helper(self):
+        cpp = (ROOT / ctv.DEVICE_CPP).read_text()
+        self.assertIn(self.ADD_MACRO, cpp)
+        self.assertEqual(ctv.parse_add_macro(cpp), ["#define ", "{name}", " ", "{value}", "\n"])
+        src = ctv.load()
+        frag = src.stages[1]
+        row = {p.name: p.values[0] for p in frag.params}
+        for helper, want in (('ss << "#define " << name << " " << value << "u\\n";', "#define PS_FST 0u\n"),
+                             ('ss << "#define " << name << " (" << value << ")\\n";', "#define PS_FST (0)\n")):
+            fmt = "".join(ctv.parse_add_macro(cpp.replace(self.ADD_MACRO, helper)))
+            text, _ = ctv.assemble(dataclasses.replace(src, macro_format=fmt), frag, row)
+            self.assertIn(want, text)
+
+    def test_add_macro_helper_of_another_shape_stops(self):
+        cpp = (ROOT / ctv.DEVICE_CPP).read_text()
+        for bent in (cpp.replace(self.ADD_MACRO, 'ss << "#define " << name << " " << std::hex << value << "\\n";'),
+                     cpp.replace(self.ADD_MACRO, 'ss << "#define " << name << "\\n";'),
+                     cpp.replace(self.ADD_MACRO, self.ADD_MACRO + "\n\tss << value;"),
+                     cpp.replace("const char* name, int value)", "const char* name, bool value)", 1)):
+            with self.assertRaises(ctv.SourceError):
+                ctv.parse_add_macro(bent)
 
     def test_conditional_add_macro_stops(self):
         cpp = ctv.strip_c_comments((ROOT / ctv.DEVICE_CPP).read_text())

@@ -192,6 +192,26 @@ def parse_header(cpp: str) -> tuple[list[HeaderLine], set[str]]:
     return lines, features
 
 
+def parse_add_macro(cpp: str) -> list[str]:
+    """AddMacro's output as pieces: string literals, and "{name}" / "{value}" where it streams its parameters. Its
+    one statement must be `ss << ...;` of literals, `name` and `value`, with an integer `value`."""
+    m = re.search(r"static void AddMacro\(std::stringstream& ss, const char\* name, (\w+) value\)", cpp)
+    if not m or m.group(1) not in ("int", "u32", "s32", "unsigned"):
+        raise SourceError(f"{DEVICE_CPP}: AddMacro(ss, const char* name, <integer> value) not found")
+    body, line0 = function_body(cpp, re.escape(m.group(0)))
+    statement = re.fullmatch(r"\s*ss((?:\s*<<\s*(?:\"(?:\\.|[^\"\\])*\"|name|value))+)\s*;\s*", body)
+    if not statement:
+        raise SourceError(f"{DEVICE_CPP}:{line0}: AddMacro is not one `ss << ...;` of literals, name and value; "
+                          f"teach {Path(__file__).name}")
+    pieces = []
+    for piece in re.findall(r'<<\s*("(?:\\.|[^"\\])*"|name|value)', statement.group(1)):
+        pieces.append("{" + piece + "}" if piece in ("name", "value") else c_string(piece[1:-1]).replace("{", "{{")
+                      .replace("}", "}}"))
+    if pieces.count("{name}") != 1 or pieces.count("{value}") != 1:
+        raise SourceError(f"{DEVICE_CPP}:{line0}: AddMacro must stream name and value once each")
+    return pieces
+
+
 def parse_stage_macros(cpp: str) -> dict[str, str]:
     """AddShaderStageMacro's line for each of its flags (vs, gs, fs)."""
     body, _ = function_body(cpp, r"static void AddShaderStageMacro\(std::stringstream& ss, bool vs, bool gs, bool fs\)")
@@ -483,6 +503,7 @@ class Variant:
 @dataclasses.dataclass
 class Sources:
     header: list[HeaderLine]
+    macro_format: str  # AddMacro's output, a str.format over name and value
     stages: list[Stage]
     tfx: str
 
@@ -491,6 +512,7 @@ def load(root: Path = ROOT, tfx_path: Path | None = None) -> Sources:
     cpp = strip_c_comments((root / DEVICE_CPP).read_text())
     check_shader_path(cpp)
     header, header_features = parse_header(cpp)
+    macro_format = "".join(parse_add_macro(cpp))
     enums = parse_enums((root / ENUMS_H).read_text())
     device_h = (root / DEVICE_H).read_text()
     tfx = (tfx_path or root / TFX).read_text()
@@ -514,7 +536,7 @@ def load(root: Path = ROOT, tfx_path: Path | None = None) -> Sources:
             if not set(c.params) <= names:
                 raise SourceError(f"constraint on {c.params} names something {recipe.stage} no longer has")
         stages.append(Stage(recipe, params, constraints, interaction_groups(tfx, header, names)))
-    return Sources(header, stages, tfx)
+    return Sources(header, macro_format, stages, tfx)
 
 
 def assemble(src: Sources, stage: Stage, values: dict[str, int]) -> tuple[str, int]:
@@ -523,7 +545,7 @@ def assemble(src: Sources, stage: Stage, values: dict[str, int]) -> tuple[str, i
     parts = [h.text for h in src.header if h.guard is None or eval(h.guard, {"__builtins__": {}}, {"F": F})]
     parts.append(stage.recipe.stage_line)
     for m in stage.recipe.macros:
-        parts.append(f"#define {m.name} {values[m.feature or m.name]}\n")
+        parts.append(src.macro_format.format(name=m.name, value=values[m.feature or m.name]))
     prefix = "".join(parts)
     return prefix + src.tfx, prefix.count("\n")
 
