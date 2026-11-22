@@ -114,15 +114,21 @@ CONSTRAINTS = [
                lambda v: v["PS_DATE"] not in (1, 2) or not v["PS_NO_COLOR"],
                "DATE 1 and 2 are the PrimID pass, which writes colour",
                ((DEVICE_CPP, r"pipe\.ps\.no_color = false;", 1),)),
-    # Selectors wider than their values (tfx is 3 bits, blend_hw 3, blend_mix 2). The other wide ones copy a register
-    # field of their own width (ALPHA.A..D, TEST.ZTST, SCANMSK, CLAMP, psm.fmt), use every value (pal_fmt,
-    # depth_fmt, process_*, dither), or their spare values already share class 0 (channel 7).
+    # Selectors wider than their values (tfx is 3 bits, blend_hw 3, blend_mix 2, channel 3). The other wide ones
+    # copy a register field of their own width (ALPHA.A..D, TEST.ZTST, SCANMSK, CLAMP) or use every value
+    # (pal_fmt, depth_fmt, process_*, dither). dst_fmt / aem_fmt are psm.fmt, 3 for a non-colour format, which a
+    # draw can have: GSState::FlushPrim only warns about it (GSState.cpp, "Possible invalid draw"), in dev builds.
     Constraint("frag", ("PS_TFX",),
                lambda v: v["PS_TFX"] <= 4,
                "tfx is TFX_DECAL, TEX0.TFX (2 bits) or 4 (TFX_NONE)",
                ((RENDERER_HW, r"m_conf\.ps\.tfx = m_cached_ctx\.TEX0\.TFX;", 1),
                 (RENDERER_HW, r"m_conf\.ps\.tfx = 4;", 3),
                 (GSREGS, r"TFX_NONE\s+= 4,", 1))),
+    Constraint("frag", ("PS_CHANNEL_FETCH",),
+               lambda v: v["PS_CHANNEL_FETCH"] <= 6,
+               "channel is a ChannelFetch (NONE .. GXBY = 6)",
+               ((DEVICE_H, r"ChannelFetch_GXBY\s+= 6,", 1),
+                (RENDERER_HW, r"m_conf\.ps\.channel = channel_select;", 1))),
     Constraint("frag", ("PS_BLEND_HW",),
                lambda v: v["PS_BLEND_HW"] <= 6,
                "blend_hw is a HWBlendType (at most INV_SRC_DST_BLEND_HALF = 6), here or through blend_multi_pass",
