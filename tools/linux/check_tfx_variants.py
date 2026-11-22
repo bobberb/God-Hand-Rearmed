@@ -569,6 +569,23 @@ class Sources:
     macro_format: str  # AddMacro's output, a str.format over name and value
     stages: list[Stage]
     tfx: str
+    warnings: list[str] = dataclasses.field(default_factory=list)
+
+
+def check_names(glsl: str, header: list[HeaderLine], recipes: list[StageRecipe]) -> None:
+    """A PS_ / VS_ / GS_ name tfx.glsl reads that neither GSDeviceVK.cpp nor tfx.glsl itself defines is a
+    SourceError: the preprocessor reads it as 0 without a word, so it is almost always a misspelling."""
+    text = strip_c_comments(glsl)
+    defined = set(re.findall(r"^\s*#\s*define\s+(\w+)", text, re.M))
+    defined |= {m.name for r in recipes for m in r.macros}
+    defined |= {m.group(1) for h in header for m in [re.match(r"#define (\w+)", h.text)] if m}
+    for n, line in enumerate(text.splitlines(), 1):
+        if re.match(r"\s*#\s*(define|undef)\b", line):
+            continue
+        for name in re.findall(r"\b((?:PS|VS|GS)_[A-Z0-9_]+)\b", line):
+            if name not in defined:
+                raise SourceError(f"tfx.glsl:{n}: {name} is read but nothing defines it (GSDeviceVK.cpp's AddMacro "
+                                  f"or a #define in tfx.glsl); a misspelling?")
 
 
 def load(root: Path = ROOT, tfx_path: Path | None = None) -> Sources:
@@ -581,10 +598,17 @@ def load(root: Path = ROOT, tfx_path: Path | None = None) -> Sources:
     tfx = (tfx_path or root / TFX).read_text()
     stages = []
     stage_lines = parse_stage_macros(cpp)
+    warnings: list[str] = []
+    check_names(tfx, header, parse_stages(cpp))
     for recipe in parse_stages(cpp):
         fields = parse_selector(device_h, recipe.selector, enums)
         feature_names = set(header_features) | {m.feature for m in recipe.macros if m.feature}
         uses = macro_uses(tfx, {m.name for m in recipe.macros})
+        for m in recipe.macros:
+            u = uses[m.name]
+            if not (u.atoms or u.exact or u.value):
+                # Not an error: a selector another backend reads, or one kept for later, is harmless here.
+                warnings.append(f"{DEVICE_CPP}:{m.line}: {recipe.function} adds {m.name}, which tfx.glsl never reads")
         params = []
         for m in recipe.macros:
             if m.feature:
@@ -615,7 +639,7 @@ def load(root: Path = ROOT, tfx_path: Path | None = None) -> Sources:
             elif not finished:
                 stage.gave_up.append((name, line))
         stages.append(stage)
-    return Sources(header, macro_format, stages, tfx)
+    return Sources(header, macro_format, stages, tfx, warnings)
 
 
 def assemble(src: Sources, stage: Stage, values: dict[str, int]) -> tuple[str, int]:
@@ -1179,6 +1203,8 @@ def main(argv: list[str] | None = None) -> int:
         return 2
     vs, stats = variants(src)
 
+    for w in src.warnings:
+        print(f"WARNING {w}")
     if args.list:
         for stage in src.stages:
             print(f"{stage.recipe.stage}: {len(stage.params)} parameters")

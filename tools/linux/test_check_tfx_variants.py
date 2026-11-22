@@ -446,6 +446,20 @@ class Declarations(unittest.TestCase):
             vs, _ = ctv.variants(src)
             self.assertTrue(any(all(v.values[k] == x for k, x in want.items()) for v in vs if v.stage == "frag"))
 
+    def test_a_misspelt_selector_stops_and_an_unread_one_warns(self):
+        base = (ROOT / ctv.TFX).read_text()
+        tfx = base.replace("#if PS_SEE_THROUGH\n", "#if PS_SEE_THRUOGH\n", 1)
+        self.assertNotEqual(tfx, base)
+        with tempfile.TemporaryDirectory() as d:
+            (Path(d) / "tfx.glsl").write_text(tfx)
+            with self.assertRaisesRegex(ctv.SourceError, r"tfx\.glsl:\d+: PS_SEE_THRUOGH is read but nothing"):
+                ctv.load(tfx_path=Path(d) / "tfx.glsl")
+        self.assertEqual(ctv.load().warnings, [w for w in ctv.load().warnings if "VS_PROVOKING_VERTEX_LAST" in w])
+        self.assertEqual(len(ctv.load().warnings), 1)
+        recipes = ctv.parse_stages(ctv.strip_c_comments((ROOT / ctv.DEVICE_CPP).read_text()))
+        ctv.check_names("#ifndef PS_FST\n#define PS_FST 0\n#endif\n#if GS_LOCAL\n#endif\n#define GS_LOCAL 1\n", [],
+                        recipes)
+
     def test_real_shader_searches_all_finish(self):
         src = ctv.load()
         for stage in src.stages:
