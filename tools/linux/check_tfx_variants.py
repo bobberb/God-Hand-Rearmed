@@ -319,9 +319,9 @@ def parse_macro_arg(expr: str, where: str) -> tuple[str | None, str | None]:
                       f"teach {Path(__file__).name}")
 
 
-def parse_stages(cpp: str) -> list[StageRecipe]:
+def parse_stages(cpp: str, stage_lines: dict[str, str] | None = None) -> list[StageRecipe]:
     """Each GSDeviceVK::GetTFX*Shader: header, stage macro, AddMacro lines in order, then the shader text."""
-    stage_lines = parse_stage_macros(cpp)
+    stage_lines = stage_lines or parse_stage_macros(cpp)
     recipes = []
     for m in re.finditer(r"\w+ GSDeviceVK::(GetTFX\w+Shader)\((?:const )?GSHWDrawConfig::(\w+)&? sel\)", cpp):
         function, selector = m.group(1), m.group(2)
@@ -620,9 +620,10 @@ def load(root: Path = ROOT, tfx_path: Path | None = None) -> Sources:
     tfx = (tfx_path or root / TFX).read_text()
     stages = []
     stage_lines = parse_stage_macros(cpp)
+    recipes = parse_stages(cpp, stage_lines)
     warnings: list[str] = []
-    check_names(tfx, header, parse_stages(cpp))
-    for recipe in parse_stages(cpp):
+    check_names(tfx, header, recipes)
+    for recipe in recipes:
         fields = parse_selector(device_h, recipe.selector, enums)
         feature_names = set(header_features) | {m.feature for m in recipe.macros if m.feature}
         uses = macro_uses(tfx, {m.name for m in recipe.macros})
@@ -649,10 +650,11 @@ def load(root: Path = ROOT, tfx_path: Path | None = None) -> Sources:
         for c in constraints:
             if not set(c.params) <= names:
                 raise SourceError(f"constraint on {c.params} names something {recipe.stage} no longer has")
-        stage = Stage(recipe, params, constraints, interaction_groups(tfx, header, names))
         own = re.fullmatch(r"#define (\w+) .*\n", recipe.stage_line).group(1)
         others = {re.fullmatch(r"#define (\w+) .*\n", line).group(1) for line in stage_lines.values()} - {own}
-        cond = Conditions(tfx, header, own, others, names)
+        aliases = {m.name: m.feature for m in recipe.macros if m.feature}
+        cond = Conditions(tfx, header, own, others, names, aliases)
+        stage = Stage(recipe, params, constraints, interaction_groups(cond))
         allowed = checker(params, constraints)
         for name, line, use, decls in use_without_declaration(cond):
             env, finished = find_missing_declaration(cond, use, decls, params, constraints, allowed)
@@ -675,54 +677,15 @@ def assemble(src: Sources, stage: Stage, values: dict[str, int]) -> tuple[str, i
     return prefix + src.tfx, prefix.count("\n")
 
 
-def interaction_groups(glsl: str, header: list[HeaderLine], names: set[str]) -> list[tuple[str, ...]]:
-    """For each #if / #elif of tfx.glsl, the parameters it and every block around it read (an #elif or #else branch
-    also reads the conditions before it), with the shader's own #defines (SW_BLEND, ZWRITE...) and the header's
-    (DISABLE_TEXTURE_BARRIER: the features guarding it) expanded; the groups of three or more."""
-    text = strip_c_comments(glsl)
-    defines = {}
-    for m in re.finditer(r"^\s*#\s*define\s+(\w+)[ \t]+(.+)$", text, re.M):
-        defines.setdefault(m.group(1), m.group(2))
-    from_header = {}
-    for h in header:
-        m = re.fullmatch(r"#define (\w+).*\n", h.text)
-        if m and h.guard:
-            from_header[m.group(1)] = set(re.findall(r'F\["([\w.]+)"\]', h.guard))
-
-    def reads(expr: str, seen: frozenset = frozenset()) -> set[str]:
-        out = set()
-        for w in re.findall(r"\b[A-Za-z_]\w*\b", expr):
-            if w in names:
-                out.add(w)
-            elif w in from_header:
-                out |= from_header[w] & names
-            elif w in defines and w not in seen:
-                out |= reads(defines[w], seen | {w})
-        return out
-    stack, groups = [], set()
-    for n, line in enumerate(text.splitlines(), 1):
-        m = re.match(r"\s*#\s*(if|ifdef|ifndef|elif|else|endif)\b(.*)", line)
-        if not m:
-            continue
-        directive, rest = m.groups()
-        if directive == "if":
-            stack.append(reads(rest))
-        elif directive in ("ifdef", "ifndef"):  # selector macros are always defined: only the header's count
-            stack.append(set().union(*(from_header[w] & names for w in re.findall(r"\w+", rest) if w in from_header)))
-        elif directive == "elif" and stack:
-            stack[-1] = stack[-1] | reads(rest)
-        elif directive == "endif" and stack:
-            stack.pop()
-            continue
-        elif directive == "else" and stack:
-            continue
-        else:
-            raise SourceError(f"tfx.glsl:{n}: #{directive} without #if")
-        group = set().union(*stack)
+def interaction_groups(cond: "Conditions") -> list[tuple[str, ...]]:
+    """For each block of tfx.glsl, the parameters it and every block around it read (an #elif or #else branch also
+    reads the conditions before it), with the shader's #defines, the header's and the feature-set AddMacro names
+    resolved to what they read (Conditions); the groups of three or more."""
+    groups = set()
+    for stack in {stack for _, stack, _ in cond.lines}:
+        group = set().union(set(), *(cond.reads(c) for c in stack))
         if len(group) >= 3:
             groups.add(tuple(sorted(group)))
-    if stack:
-        raise SourceError("tfx.glsl: #if without #endif")
     return sorted(groups)
 
 
@@ -803,8 +766,10 @@ class Conditions:
     three-valued evaluator of them: 1, 0, or None while it depends on parameters not set yet."""
 
     def __init__(self, glsl: str, header: list[HeaderLine], stage_macro: str, other_stage_macros: set[str],
-                 names: set[str]):
+                 names: set[str], aliases: dict[str, str] | None = None):
         self.names = names
+        # AddMacro names set from a device feature (VS_PROVOKING_VERTEX_LAST): read as that feature's parameter.
+        self.aliases = aliases or {}
         self.stage_macro, self.other_stage_macros = stage_macro, other_stage_macros
         text = strip_c_comments(glsl)
         self.defines: dict[str, set[str]] = {}
@@ -859,8 +824,8 @@ class Conditions:
             return node
         if kind == "defined":
             name = node[1]
-            if name in self.names:
-                return ("id", name) if name.startswith("features.") else ("num", 1)
+            if name in self.names or name in self.aliases:  # the game defines every AddMacro name
+                return ("num", 1)
             if name in self.header:
                 return self.header[name]
             return ("num", int(name == self.stage_macro))
@@ -868,6 +833,8 @@ class Conditions:
             name = node[1]
             if name in self.names:
                 return node
+            if name in self.aliases:
+                return ("id", self.aliases[name])
             if name in self.header:
                 return self.header[name]
             if name == self.stage_macro:

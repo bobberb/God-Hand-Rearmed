@@ -476,30 +476,63 @@ class Declarations(unittest.TestCase):
 
 
 class Groups(unittest.TestCase):
+    @staticmethod
+    def groups(glsl, header=(), names=frozenset({"A", "B", "C", "D", "features.barrier"}), aliases=None):
+        return ctv.interaction_groups(ctv.Conditions(glsl, list(header), "FRAGMENT_SHADER", {"VERTEX_SHADER"},
+                                                     set(names), aliases))
+
     def test_nesting_elif_and_expanded_defines(self):
         header = [ctv.HeaderLine("#define NO_BARRIER 1\n", ' not F["features.barrier"] ')]
-        names = {"A", "B", "C", "D", "features.barrier"}
         glsl = """#define AB (A || B)
 #if AB
   #if C
+  x;
   #endif
 #elif D
+  x;
 #endif
 #ifdef NO_BARRIER
   #if A && C
+  x;
   #endif
 #endif
 #ifndef A
+x;
 #endif
 """
-        self.assertEqual(ctv.interaction_groups(glsl, header, names),
+        self.assertEqual(self.groups(glsl, header),
                          [("A", "B", "C"), ("A", "B", "D"), ("A", "C", "features.barrier")])
+
+    def test_feature_set_macros_read_as_their_feature(self):
+        # VS_PROVOKING_VERTEX_LAST is AddMacro'd from m_features.provoking_vertex_last: the parameter is the feature.
+        names = {"VS_EXPAND", "VS_FST", "features.provoking_vertex_last"}
+        aliases = {"VS_PROVOKING_VERTEX_LAST": "features.provoking_vertex_last"}
+        glsl = "#if VS_PROVOKING_VERTEX_LAST && VS_EXPAND == 1 && VS_FST == 0\nx;\n#endif\n" \
+               "#if !VS_PROVOKING_VERTEX_LAST\ny;\n#endif\n#ifdef VS_PROVOKING_VERTEX_LAST\nz;\n#endif\n"
+        self.assertEqual(self.groups(glsl, names=names, aliases=aliases),
+                         [("VS_EXPAND", "VS_FST", "features.provoking_vertex_last")])
+        cond = ctv.Conditions(glsl, [], "VERTEX_SHADER", set(), names, aliases)
+        stacks = {line: stack for _, stack, line in cond.lines}
+        self.assertEqual(cond.stack_value(stacks["y;"], {"features.provoking_vertex_last": 1}), 0)
+        self.assertEqual(cond.stack_value(stacks["y;"], {"features.provoking_vertex_last": 0}), 1)
+        self.assertEqual(cond.stack_value(stacks["z;"], {}), 1)
+
+    def test_critic_repro_feature_group_in_the_real_shader(self):
+        base = (ROOT / ctv.TFX).read_text()
+        anchor = "#if VS_EXPAND == VS_EXPAND_POINT\n"
+        self.assertEqual(base.count(anchor), 1)
+        tfx = base.replace(anchor, "#if VS_PROVOKING_VERTEX_LAST && VS_EXPAND == VS_EXPAND_POINT && VS_FST == 0\n"
+                                   "\tfloat kamite_p = 0.0;\n#endif\n" + anchor, 1)
+        with tempfile.TemporaryDirectory() as d:
+            (Path(d) / "tfx.glsl").write_text(tfx)
+            src = ctv.load(tfx_path=Path(d) / "tfx.glsl")
+        self.assertIn(("VS_EXPAND", "VS_FST", "features.provoking_vertex_last"), src.stages[0].groups)
 
     def test_unbalanced(self):
         with self.assertRaises(ctv.SourceError):
-            ctv.interaction_groups("#if A\n", [], {"A"})
+            self.groups("#if A\n")
         with self.assertRaises(ctv.SourceError):
-            ctv.interaction_groups("#endif\n", [], {"A"})
+            self.groups("#endif\n")
 
 
 class Covering(unittest.TestCase):
