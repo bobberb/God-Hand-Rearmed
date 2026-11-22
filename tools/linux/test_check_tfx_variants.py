@@ -676,7 +676,9 @@ class ShaderMacros(unittest.TestCase):
         self.assertTrue(all(v["PS_FOG"] == 1 and v["PS_CHANNEL_FETCH"] == 5 for v in holding))
 
     def test_a_function_like_or_unreadable_macro_in_a_condition_stops(self):
-        for glsl in ("#define F(x) (x)\n#if F\n#endif\n", "#define D { a = 1; }\n#if D\n#endif\n"):
+        for glsl in ("#define F(x) (x)\n#if F\n#endif\n", "#define D { a = 1; }\n#if D\n#endif\n",
+                     "#if __VERSION__ >= 450\n#endif\n", "#ifdef VULKAN\n#endif\n", "#if GL_SPIRV\n#endif\n",
+                     "#if A && \\\n    A\n#endif\n"):
             with self.subTest(glsl=glsl), self.assertRaises(ctv.SourceError):
                 ctv.Conditions(glsl, [], "FRAGMENT_SHADER", set(), {"A"})
 

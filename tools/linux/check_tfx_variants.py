@@ -23,7 +23,12 @@ Coverage rule, per stage (vert, frag), over the parameters (selector macros and 
     all those around it, with the shader's own #defines like SW_BLEND or ZWRITE and the header's like
     DISABLE_TEXTURE_BARRIER expanded to what they read);
   - every line of tfx.glsl a game build can compile, compiled by some variant: each block (#if stack) no variant
-    compiles gets a search for parameter values that compile it; none found proves no game build does;
+    compiles gets a search for parameter values that compile it; none found proves no game build does. This is
+    exact as far as the preprocessor is modelled (Conditions): #if / #ifdef / #ifndef / #elif / #else, and #define
+    / #undef in line order under their own #if, object-like macros, the header's lines and the stage macro. What
+    it does not model stops the check (exit 2) instead of reading as 0: a function-like macro or a body that is no
+    expression in a condition, a predefined macro (__VERSION__, GL_*, VULKAN), a directive continued with a
+    trailing backslash;
   - for every use of a name whose declarations in reach (in its function, its function's parameters, the globals,
     the shader's #defines) are all under some condition not around the use: a variant compiling the use and none
     of them, if the constraints allow one; and where those declarations differ in type or signature (an
@@ -823,6 +828,9 @@ class Conditions:
         for n, line in enumerate(text.splitlines(), 1):
             toks = TOKEN.findall(line)
             where = f"tfx.glsl:{n}"
+            if toks[:1] == ["#"] and line.rstrip().endswith("\\"):
+                raise SourceError(f"{where}: a directive continued on the next line; {Path(__file__).name} reads "
+                                  f"one line per directive")
             if toks[:1] == ["#"] and len(toks) > 1 and toks[1] in ("if", "ifdef", "ifndef", "elif", "else", "endif"):
                 d = toks[1]
                 if d in ("if", "ifdef", "ifndef"):
@@ -883,6 +891,9 @@ class Conditions:
         key = (name, mode, self._count, name in seen)
         if key in self._chains:
             return self._chains[key]
+        if not self.events.get(name) and re.fullmatch(r"__\w+__|GL_\w+|VULKAN", name):
+            raise SourceError(f"tfx.glsl reads {name}, which shaderc predefines and {Path(__file__).name} does not "
+                              f"model (it would read as 0); teach it")
         out: tuple = ("num", 0)
         for where, under, kind, body in self.events.get(name, ()):
             if kind == "undef":
