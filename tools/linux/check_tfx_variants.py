@@ -316,6 +316,12 @@ class Macro:
     field: str | None  # selector field, or
     feature: str | None  # device feature ("features.x")
     line: int
+    # `X ? a : b`: the value written is a where the field or feature is non-zero, else b
+    choice: tuple[int, int] | None = None
+
+    def value(self, values: dict) -> int:
+        v = values[self.feature or self.name]
+        return v if self.choice is None else self.choice[0] if v else self.choice[1]
 
 
 @dataclasses.dataclass
@@ -330,14 +336,20 @@ class StageRecipe:
 KINDS = {"GetVertexShader": "vert", "GetFragmentShader": "frag"}
 
 
-def parse_macro_arg(expr: str, where: str) -> tuple[str | None, str | None]:
+def parse_macro_arg(expr: str, where: str) -> tuple[str | None, str | None, tuple[int, int] | None]:
+    """(selector field, device feature, choice) for an AddMacro value: `sel.x`, `m_features.x`, either of them
+    `? <int> : <int>` (choice: the value where it is non-zero, the value where it is 0), in a static_cast or not."""
     e = re.sub(r"^static_cast<\w+>\((.*)\)$", r"\1", expr.strip())
+    choice = None
+    m = re.fullmatch(r"\(?\s*(sel\.\w+|m_features\.\w+)\s*\?\s*(-?\d+)\s*:\s*(-?\d+)\s*\)?", e)
+    if m:
+        e, choice = m.group(1), (int(m.group(2)), int(m.group(3)))
     m = re.fullmatch(r"sel\.(\w+)", e)
     if m:
-        return m.group(1), None
+        return m.group(1), None, choice
     m = re.fullmatch(r"m_features\.(\w+)", e)
     if m:
-        return None, f"features.{m.group(1)}"
+        return None, f"features.{m.group(1)}", choice
     raise SourceError(f"{where}: AddMacro value {expr!r} is neither a selector field nor a device feature; "
                       f"teach {Path(__file__).name}")
 
@@ -360,14 +372,14 @@ def parse_stages(cpp: str, stage_lines: dict[str, str] | None = None) -> list[St
                 steps.append("stage")
                 stage_line = stage_lines[flags[0]] if flags else ""
             elif mm := re.fullmatch(r'AddMacro\(ss, "(\w+)", (.+)\);', s):
-                field, feature = parse_macro_arg(mm.group(2), where)
+                field, feature, choice = parse_macro_arg(mm.group(2), where)
                 twice = [m for m in macros if m.name == mm.group(1)]
                 if twice:
                     # A second #define of a name with another value is shaderc's "Macro redefined" error on every
                     # variant where the values differ; with the same value it is dead code. Neither is meant.
                     raise SourceError(f"{where}: {function} adds {mm.group(1)} again (first at {DEVICE_CPP}:"
                                       f"{twice[0].line})")
-                macros.append(Macro(mm.group(1), field, feature, n))
+                macros.append(Macro(mm.group(1), field, feature, n, choice))
                 steps.append("macro")
             elif s == "ss << m_tfx_source;":
                 steps.append("source")
@@ -695,7 +707,10 @@ def load(root: Path = ROOT, tfx_path: Path | None = None) -> Sources:
             # value) come from values the game builds.
             own = [c for c in CONSTRAINTS if c.stage == recipe.stage and c.params == (m.name,)]
             domain = [x for x in fields[m.field] if all(c.ok({m.name: x}) for c in own)]
-            params.append(Param(m.name, tuple(value_classes(domain, uses[m.name]))))
+            if m.choice:  # only zero or not reaches the shader: one value of each
+                params.append(Param(m.name, tuple([x for x in domain if not x][:1] + [x for x in domain if x][:1])))
+            else:
+                params.append(Param(m.name, tuple(value_classes(domain, uses[m.name]))))
         params += [Param(f, (0, 1)) for f in sorted(feature_names)]
         names = {p.name for p in params}
         constraints = [c for c in CONSTRAINTS if c.stage == recipe.stage]
@@ -704,7 +719,9 @@ def load(root: Path = ROOT, tfx_path: Path | None = None) -> Sources:
                 raise SourceError(f"constraint on {c.params} names something {recipe.stage} no longer has")
         own = re.fullmatch(r"#define (\w+) .*\n", recipe.stage_line).group(1)
         others = {re.fullmatch(r"#define (\w+) .*\n", line).group(1) for line in stage_lines.values()} - {own}
-        aliases = {m.name: m.feature for m in recipe.macros if m.feature}
+        # AddMacro names that are not a parameter of their own: a feature, or a choice over a field or feature.
+        aliases = {m.name: ("sel", ("id", m.feature or m.name), ("num", m.choice[0]), ("num", m.choice[1]))
+                   if m.choice else m.feature for m in recipe.macros if m.feature or m.choice}
         cond = Conditions(tfx, header, own, others, names, aliases)
         stage = Stage(recipe, params, constraints, interaction_groups(cond), cond=cond)
         allowed = checker(params, constraints)
@@ -724,7 +741,7 @@ def assemble(src: Sources, stage: Stage, values: dict[str, int]) -> tuple[str, i
     parts = [h.text for h in src.header if h.guard is None or eval(h.guard, {"__builtins__": {}}, {"F": F})]
     parts.append(stage.recipe.stage_line)
     for m in stage.recipe.macros:
-        parts.append(src.macro_format.format(name=m.name, value=values[m.feature or m.name]))
+        parts.append(src.macro_format.format(name=m.name, value=m.value(values)))
     prefix = "".join(parts)
     return prefix + src.tfx, prefix.count("\n")
 
@@ -896,10 +913,11 @@ class Conditions:
                 return ("num", 1)
             return self._chain(node[1], "defined", seen)
         if kind == "id":
+            if node[1] in self.aliases:  # a feature's name, or a ternary over a field or feature
+                alias = self.aliases[node[1]]
+                return ("id", alias) if isinstance(alias, str) else alias
             if node[1] in self.names:
                 return node
-            if node[1] in self.aliases:
-                return ("id", self.aliases[node[1]])
             return self._chain(node[1], "value", seen)
         return (kind, node[1], *(self.resolve(x, seen) for x in node[2:]))
 

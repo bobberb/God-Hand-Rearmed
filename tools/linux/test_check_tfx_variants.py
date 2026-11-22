@@ -363,11 +363,58 @@ static void AddShaderHeader(std::stringstream& ss)
             ctv.parse_header(self.HEADER.replace("!features.a", "!features.a || GSConfig.X"))
 
     def test_add_macro_values(self):
-        self.assertEqual(ctv.parse_macro_arg("sel.tme", "x"), ("tme", None))
-        self.assertEqual(ctv.parse_macro_arg("static_cast<u32>(sel.atst)", "x"), ("atst", None))
-        self.assertEqual(ctv.parse_macro_arg("static_cast<int>(m_features.pvl)", "x"), (None, "features.pvl"))
-        with self.assertRaises(ctv.SourceError):
-            ctv.parse_macro_arg("sel.tme && GSConfig.X", "x")
+        self.assertEqual(ctv.parse_macro_arg("sel.tme", "x"), ("tme", None, None))
+        self.assertEqual(ctv.parse_macro_arg("static_cast<u32>(sel.atst)", "x"), ("atst", None, None))
+        self.assertEqual(ctv.parse_macro_arg("static_cast<int>(m_features.pvl)", "x"), (None, "features.pvl", None))
+        # Upstream PCSX2 8daa367ef0 (GSDeviceVK.cpp): a feature through a ternary.
+        self.assertEqual(ctv.parse_macro_arg("m_features.depth_feedback ? 1 : 2", "x"),
+                         (None, "features.depth_feedback", (1, 2)))
+        self.assertEqual(ctv.parse_macro_arg("sel.fst ? 3 : 0", "x"), ("fst", None, (3, 0)))
+        for bad in ("sel.tme && GSConfig.X", "sel.tme ? x : 0", "m_features.a ? 1 : 2 + 1", "sel.a ? sel.b : 1",
+                    "GSConfig.X ? 1 : 2"):
+            with self.subTest(bad=bad), self.assertRaises(ctv.SourceError):
+                ctv.parse_macro_arg(bad, "x")
+
+    UPSTREAM = '\tAddMacro(ss, "PS_DEPTH_FEEDBACK_SUPPORT", m_features.depth_feedback ? 1 : 2);\n'
+
+    @staticmethod
+    def root_with(cpp_edit=None, tfx_edit=None):
+        """A scratch copy of the sources load() reads, with an edit to GSDeviceVK.cpp and / or tfx.glsl."""
+        d = tempfile.TemporaryDirectory()
+        for path in (ctv.DEVICE_CPP, ctv.DEVICE_H, ctv.ENUMS_H, ctv.RENDERER_HW, ctv.TFX, ctv.BRIDGE, ctv.GSREGS):
+            text = (ROOT / path).read_text()
+            edit = cpp_edit if path == ctv.DEVICE_CPP else tfx_edit if path == ctv.TFX else None
+            if edit:
+                assert edit[0] in text, edit[0]
+                text = text.replace(edit[0], edit[1], 1)
+            (Path(d.name) / path).parent.mkdir(parents=True, exist_ok=True)
+            (Path(d.name) / path).write_text(text)
+        return d
+
+    def test_a_ternary_add_macro_maps_its_value(self):
+        fst = '\tAddMacro(ss, "PS_FST", sel.fst);\n'
+        reads = ("#if PS_ZTST == ZTST_GEQUAL",
+                 "#if PS_DEPTH_FEEDBACK_SUPPORT == 2 && PS_FST_ON == 3\n\tinput_z += 0.0;\n#endif\n"
+                 "#if PS_ZTST == ZTST_GEQUAL")
+        with self.root_with((fst, self.UPSTREAM + fst + '\tAddMacro(ss, "PS_FST_ON", sel.fst ? 3 : 0);\n'),
+                            reads) as d:
+            src = ctv.load(Path(d))
+        frag = src.stages[1]
+        params = {p.name: p.values for p in frag.params}
+        self.assertEqual(params["features.depth_feedback"], (0, 1))  # the feature, not a macro of its own
+        self.assertNotIn("PS_DEPTH_FEEDBACK_SUPPORT", params)
+        self.assertEqual(params["PS_FST_ON"], (0, 1))                 # zero or not, as fst gives it
+        row = {p.name: p.values[0] for p in frag.params}
+        for feature, fst_value, want in ((0, 0, ("2", "0")), (1, 1, ("1", "3"))):
+            row.update({"features.depth_feedback": feature, "PS_FST_ON": fst_value})
+            text, _ = ctv.assemble(src, frag, row)
+            self.assertIn(f"#define PS_DEPTH_FEEDBACK_SUPPORT {want[0]}\n", text)
+            self.assertIn(f"#define PS_FST_ON {want[1]}\n", text)
+        stack = next(st for _, st, line in frag.cond.lines if line == "\tinput_z += 0.0;"
+                     and any("PS_FST_ON" in repr(c) or "sel" in repr(c) for c in st))
+        self.assertEqual(frag.cond.stack_value(stack, {"features.depth_feedback": 0, "PS_FST_ON": 1}), 1)
+        self.assertEqual(frag.cond.stack_value(stack, {"features.depth_feedback": 1, "PS_FST_ON": 1}), 0)
+        self.assertEqual(frag.cond.stack_value(stack, {"features.depth_feedback": 0, "PS_FST_ON": 0}), 0)
 
     ADD_MACRO = 'ss << "#define " << name << " " << value << "\\n";'
 
