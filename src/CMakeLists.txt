@@ -714,6 +714,9 @@ if(KAMITE_SPLIT_GAME_CODE)
             target_link_options(${name} PRIVATE -Wl,-z,undefs)
         endif()
     endfunction()
+    # GHR exports every symbol for the library to bind to (-rdynamic; on Windows the .def above and GHR.lib). Set
+    # before the library links GHR: CMake checks it when target_link_libraries names the executable.
+    set_target_properties(kamite PROPERTIES ENABLE_EXPORTS ON)
     kamite_game_library(ghr_game)
     foreach(gameTarget kamite_game_code kamite_game_code_huge kamite_modules kamite_vu1_code)
         if(TARGET ${gameTarget})
@@ -721,8 +724,7 @@ if(KAMITE_SPLIT_GAME_CODE)
         endif()
     endforeach()
 
-    # GHR: no game code, the loader, and every symbol exported for the library to bind to (-rdynamic).
-    set_target_properties(kamite PROPERTIES ENABLE_EXPORTS ON)
+    # GHR: no game code, and the loader.
     target_sources(kamite PRIVATE kamite/game_library.cpp kamite/game_library_check.cpp)
     target_include_directories(kamite PRIVATE "${CMAKE_SOURCE_DIR}/runtime/ps2xRuntime/src/lib/vu") # the check's view
     target_compile_definitions(kamite PRIVATE KAMITE_SPLIT_GAME_CODE=1 PS2X_SPLIT_GAME_CODE=1)
