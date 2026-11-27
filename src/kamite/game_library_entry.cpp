@@ -52,18 +52,18 @@ extern "C" __attribute__((visibility("default"))) uint32_t ghr_stand_in_probe(ui
 {
     return ps2EeDiv(a, b) ^ ps2EeSqrt(a);
 }
+#endif
 
 #include "kamite/game_library_shared_state.h"
 // The runtime state the game code shares with GHR, as this library sees it (game_library_shared_state.h):
-// GHR --check-game-library compares it with its own.
-extern "C" __attribute__((visibility("default"))) size_t ghr_stand_in_shared_state(const void **out, size_t count)
+// GHR --check-game-library compares it with its own. In every game library, the real one too.
+extern "C" __attribute__((visibility("default"))) size_t ghr_game_shared_state(const void **out, size_t count)
 {
     if (count < kamite::game_library::kSharedStateCount)
         return 0;
     kamite::game_library::sharedStateView(out);
     return kamite::game_library::kSharedStateCount;
 }
-#endif
 
 extern "C" __attribute__((visibility("default"))) const kamite::game_library::Entry *ghr_game_library()
 {

@@ -5,11 +5,21 @@
 //
 // A header-defined static (an inline variable, a static local of an inline function) is one object per module on
 // Windows: the game library would keep its own scratchpad pointer, VU1 packet sink, log. With PS2X_SHARED_STATE such
-// state is declared here-annotated and defined once, in src/lib/ps2_shared_state.cpp, which is in the program:
-//   PS2X_RUNTIME_API  on the declaration of every function or variable the game code takes from the runtime.
-//     Windows: exported by the program, imported by the game library (PS2X_GAME_CODE). Linux: default visibility.
+// state is declared in the headers instead and defined once, in the program: src/lib/ps2_shared_state.cpp (the
+// scratchpad pointer, the runtime log) and src/lib/vu/ps2_vu1_core.cpp (the VU state).
+//
+//   PS2X_RUNTIME_API  on the declaration of every VARIABLE the game code reads or writes from the runtime, and of the
+//     accessor functions above. Windows: exported by the program, imported by the game library (PS2X_GAME_CODE); a DLL
+//     can read data from the program only through __declspec(dllimport). Linux: default visibility.
+//     Plain functions the game code calls do not need it: Windows routes those through the import library's thunks.
+//     Exporting the program's functions for that (an import library, WINDOWS_EXPORT_ALL_SYMBOLS or a .def) is the
+//     Windows layout's own step, not made yet; so is relying on one shared C runtime (/MD) for the log's std::deque,
+//     which the game library's inline code fills and the program owns.
 // Without PS2X_SHARED_STATE (every build but the split one) it is nothing and the headers keep their inline forms:
-// the normal build's code is unchanged. tools/linux/check_shared_state.py keeps new header statics out.
+// the normal build's code is unchanged.
+//
+// Kept honest by two checks (src/CMakeLists.txt, every Linux build with tests): tools/linux/check_shared_state.py
+// (the headers' lines) and tools/linux/check_shared_symbols.py (what the compiler emits from them).
 
 #if PS2X_SHARED_STATE
 #if defined(_WIN32)

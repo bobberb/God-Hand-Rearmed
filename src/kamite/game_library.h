@@ -109,8 +109,8 @@ namespace kamite::game_library
     // Registers the library's VU1 programs; false (and nothing done) when it has none.
     bool registerVu1Programs();
     // --check-game-library: compares the runtime state the library sees with GHR's (game_library_shared_state.h),
-    // printing a line per object. 0 = one object each, 1 = at least one differs, -1 = the library has no probe (only
-    // the stand-in carries one). game_library_check.cpp.
+    // printing a line per object. 0 = one object each, 1 = at least one differs, -1 = the library has no probe
+    // (ghr_game_shared_state, in every library built since it existed). game_library_check.cpp.
     int checkSharedState(const Result &loaded);
 #endif
 }

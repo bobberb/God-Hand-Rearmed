@@ -12,10 +12,10 @@ namespace kamite::game_library
     int checkSharedState(const Result &loaded)
     {
         using Probe = size_t (*)(const void **, size_t);
-        auto probe = loaded.handle ? reinterpret_cast<Probe>(dlsym(loaded.handle, "ghr_stand_in_shared_state")) : nullptr;
+        auto probe = loaded.handle ? reinterpret_cast<Probe>(dlsym(loaded.handle, "ghr_game_shared_state")) : nullptr;
         if (!probe)
         {
-            std::printf("shared state: not checked (the library has no probe; only the stand-in carries one)\n");
+            std::printf("shared state: not checked (the library has no probe: built before it had one)\n");
             return -1;
         }
         const void *mine[kSharedStateCount] = {};

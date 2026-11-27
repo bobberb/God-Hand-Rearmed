@@ -66,7 +66,7 @@ namespace vu1_impl
 #else
     // One sink per thread for the program and the game library (ps2_runtime_api.h): the runtime sets it, the VU1
     // code compiled ahead of time writes to it. A function: Windows cannot import a thread_local variable.
-    PS2X_RUNTIME_API Vu1PacketSink *&packetSinkSlot(); // src/lib/ps2_shared_state.cpp
+    PS2X_RUNTIME_API Vu1PacketSink *&packetSinkSlot(); // ps2_vu1_core.cpp
 #define PS2X_VU1_PACKET_SINK (::vu1_impl::packetSinkSlot())
 #endif
 }
@@ -977,7 +977,7 @@ inline void VU1Interpreter::finishXgkick()
         }
     }
     // The game's PATH1 filter (ps2_vu1_hooks.h): may change the packet in place and add packets after it.
-    thread_local std::vector<uint8_t> before, extra;
+    thread_local std::vector<uint8_t> before, extra; // shared-state: scratch buffers, cleared on every call
     before.clear();
     extra.clear();
     if (const ps2x::vu1hooks::Path1Filter filter = ps2x::vu1hooks::path1Filter(); filter && m_activeVuData)
@@ -2497,7 +2497,7 @@ inline Vu1NormShadow vu0NormShadow;
 #else
 // One of each for the program and the game library (ps2_runtime_api.h): the runtime invalidates them (ps2_vu1_core.cpp),
 // the compiled VU code reads them. Two copies would leave the compiled code's stale.
-extern PS2X_RUNTIME_API Vu1NormShadow vu1NormShadow; // src/lib/ps2_shared_state.cpp
+extern PS2X_RUNTIME_API Vu1NormShadow vu1NormShadow; // ps2_vu1_core.cpp
 extern PS2X_RUNTIME_API Vu1NormShadow vu0NormShadow;
 #endif
 // PS2X_VU0_LEAN: true while VU0's interpreter-only scheduler arrays (ready cycles, latest writes, VF/VI/ACC write
