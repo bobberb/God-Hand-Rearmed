@@ -142,3 +142,58 @@ jobs:
           name: windows-build-log
           path: build/port/last_build.log
           if-no-files-found: ignore
+
+  windows-split:
+    name: Windows split game library (MSVC)
+    # The split game code (KAMITE_SPLIT_GAME_CODE, src/kamite/game_library.h) on Windows: GHR.exe with no game code,
+    # exporting the runtime (a .def), and ghr_game.dll importing it through GHR.lib, on the stand-in game code. A DLL
+    # never shares a header-defined static with the program, so "9 of 9 one object" here is Windows' own answer for the
+    # state the game code shares with the runtime (ps2_runtime_api.h), not an emulation of it.
+    runs-on: windows-2022
+    timeout-minutes: 180
+    env:
+      KAMITE_ALLOW_DOWNLOADS: "1"
+      KAMITE_JOBS: "4"
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Stand-in game code
+        run: python -I tools/linux/stub_game_code.py generated
+      - name: Configure (MSVC, Ninja, release build, tests, split)
+        run: python -I build.py configure -DKAMITE_RELEASE=ON -DKAMITE_BUILD_TESTS=ON -DKAMITE_SPLIT_GAME_CODE=ON
+      - name: Build GHR.exe (no game code) and ghr_game.dll
+        run: |
+          python -I build.py build
+          if ($LASTEXITCODE) { exit 1 }
+          python -I build.py build ghr_game
+          if ($LASTEXITCODE) { exit 1 }
+      - name: GHR.exe without the game library, then with it
+        shell: pwsh
+        run: |
+          $bin = "build/port/bin"
+          foreach ($f in "GHR.exe", "ghr_game.dll") { if (-not (Test-Path "$bin/$f")) { Write-Error "missing: $bin/$f"; exit 1 } }
+          Get-ChildItem $bin -File | Format-Table Name, Length
+          $env:KAMITE_HOME = "$PWD/split_home"
+          New-Item -ItemType Directory -Force $env:KAMITE_HOME | Out-Null
+          # Without the library (another name): exit 8, "missing".
+          $env:KAMITE_GAME_LIBRARY = "$PWD/$bin/no_such_library.dll"
+          & "$bin/GHR.exe" --check-game-library | Tee-Object -Variable out
+          if ($LASTEXITCODE -ne 8) { Write-Error "without the library: exit $LASTEXITCODE, not 8"; exit 1 }
+          # With it: loaded, and one object for every piece of shared state.
+          $env:KAMITE_GAME_LIBRARY = "$PWD/$bin/ghr_game.dll"
+          & "$bin/GHR.exe" --check-game-library | Tee-Object -Variable out
+          if ($LASTEXITCODE -ne 0) { Write-Error "with the library: exit $LASTEXITCODE"; exit 1 }
+          $text = $out -join "`n"
+          if ($text -notmatch "game library: loaded") { Write-Error "not loaded"; exit 1 }
+          if ($text -notmatch "shared state: 9 of 9 one object") { Write-Error "shared state not one object per piece"; exit 1 }
+      - name: The split test (ctest)
+        shell: cmd
+        run: ctest --test-dir build\port -R split_game_library --output-on-failure
+      - if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: windows-split-build-log
+          path: build/port/last_build.log
+          if-no-files-found: ignore

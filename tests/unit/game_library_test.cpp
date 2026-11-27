@@ -15,6 +15,7 @@
 
 #include <dlfcn.h>
 
+#include <algorithm>
 #include <cstdio>
 #include <cstring>
 #include <filesystem>
@@ -90,6 +91,104 @@ namespace
     }
 }
 
+namespace
+{
+    // A minimal PE32+ file as a Windows DLL's would start: the DOS header pointing at "PE\0\0", the file header, an
+    // optional header of 240 bytes (PE32+ magic), the section table, then each section's raw data. Only what
+    // readInterfaceId reads is filled; the rest is zero. For the PE half of the reader, tested here on Linux.
+    struct PeSectionSpec
+    {
+        std::string name;    // up to 8 bytes
+        std::string data;    // its raw bytes
+        uint32_t virtualSize = 0; // 0: data's size
+    };
+
+    void put16(std::string &b, size_t at, uint16_t v) { b[at] = char(v & 0xFF); b[at + 1] = char(v >> 8); }
+    void put32(std::string &b, size_t at, uint32_t v)
+    {
+        for (int i = 0; i < 4; ++i)
+            b[at + i] = char((v >> (8 * i)) & 0xFF);
+    }
+
+    std::string makePe(const std::vector<PeSectionSpec> &sections, uint16_t machine = 0x8664, uint16_t characteristics = 0x2022,
+                       uint16_t optionalMagic = 0x20B)
+    {
+        const size_t peOffset = 0x40, fileHeader = peOffset + 4, optional = fileHeader + 20, table = optional + 240;
+        size_t raw = (table + 40 * sections.size() + 0x1FF) & ~size_t(0x1FF);
+        std::string b(raw, '\0');
+        b[0] = 'M';
+        b[1] = 'Z';
+        put32(b, 0x3C, uint32_t(peOffset));
+        b.replace(peOffset, 4, std::string("PE\0\0", 4));
+        put16(b, fileHeader, machine);
+        put16(b, fileHeader + 2, uint16_t(sections.size()));
+        put16(b, fileHeader + 16, 240);
+        put16(b, fileHeader + 18, characteristics);
+        put16(b, optional, optionalMagic);
+        for (size_t i = 0; i < sections.size(); ++i)
+        {
+            const PeSectionSpec &sec = sections[i];
+            const size_t entry = table + 40 * i;
+            b.replace(entry, std::min<size_t>(8, sec.name.size()), sec.name.substr(0, 8));
+            const size_t rawSize = (sec.data.size() + 0x1FF) & ~size_t(0x1FF);
+            put32(b, entry + 8, sec.virtualSize ? sec.virtualSize : uint32_t(sec.data.size()));
+            put32(b, entry + 16, uint32_t(rawSize));
+            put32(b, entry + 20, uint32_t(b.size()));
+            std::string block = sec.data;
+            block.resize(rawSize, '\0');
+            b += block;
+        }
+        return b;
+    }
+
+    std::string idSection(const std::string &id) { return std::string(gl::kSectionPrefix) + id + std::string(1, '\0'); }
+
+    void checkPe(const fs::path &scratch)
+    {
+        // Each case reads first and checks after: check()'s arguments are evaluated in no set order, and the message
+        // must carry this read's error, not the previous one's.
+        auto refused = [&](const char *what, const std::string &name, const std::string &bytes, const std::string &because)
+        {
+            writeAll(scratch / name, bytes);
+            std::string error;
+            const std::string id = gl::readInterfaceId(scratch / name, error);
+            check(id.empty() && contains(error, because), std::string(what) + ": " + (id.empty() ? error : "read id " + id));
+        };
+        {
+            writeAll(scratch / "pe_good.dll", makePe({{".text", "code"}, {".ghrid", idSection(kA)}, {".rdata", "data"}}));
+            std::string error;
+            const std::string id = gl::readInterfaceId(scratch / "pe_good.dll", error);
+            check(id == kA, "PE: the id from the .ghrid section: " + error);
+        }
+        refused("PE without the section", "pe_none.dll", makePe({{".text", "code"}}), "no .ghrid section");
+        refused("PE with two id sections", "pe_two.dll", makePe({{".ghrid", idSection(kA)}, {".ghrid", idSection(kB)}}),
+                "two .ghrid");
+        std::string bad = idSection(kA);
+        bad[std::strlen(gl::kSectionPrefix) + 3] = 'Z';
+        refused("PE id not lowercase hex", "pe_hex.dll", makePe({{".ghrid", bad}}), "malformed");
+        std::string badPrefix = idSection(kA);
+        badPrefix[0] = 'X';
+        refused("PE id with another prefix", "pe_prefix.dll", makePe({{".ghrid", badPrefix}}), "malformed");
+        refused("PE id section too short", "pe_short.dll", makePe({{".ghrid", std::string(gl::kSectionPrefix) + "abc"}}),
+                "malformed");
+        refused("PE id section whose virtual size is short", "pe_vsize.dll", makePe({{".ghrid", idSection(kA), 10}}),
+                "malformed");
+        refused("PE for another machine", "pe_i386.dll", makePe({{".ghrid", idSection(kA)}}, 0x14C), "64-bit Windows DLL");
+        refused("PE that is not a DLL", "pe_exe.dll", makePe({{".ghrid", idSection(kA)}}, 0x8664, 0x0022),
+                "64-bit Windows DLL");
+        refused("PE32 (not PE32+)", "pe_pe32.dll", makePe({{".ghrid", idSection(kA)}}, 0x8664, 0x2022, 0x10B),
+                "64-bit Windows DLL");
+        const std::string good = makePe({{".ghrid", idSection(kA)}});
+        refused("PE cut in its header", "pe_cut.dll", good.substr(0, 0x50), "not a PE");
+        refused("PE cut in its sections", "pe_cut2.dll", good.substr(0, 0x1F0), "past its end");
+        std::string far = good;
+        put32(far, 0x3C, 0x7FFFFFF0u); // e_lfanew far past the end
+        refused("PE header pointer past the end", "pe_far.dll", far, "not a PE");
+        const gl::Result r = gl::load({scratch / "pe_good.dll"}, kB);
+        check(r.status == gl::Status::Mismatch, "a PE built for another GHR is refused before loading: " + r.message);
+    }
+}
+
 extern "C" __attribute__((visibility("default"))) void ghrTestHostNote(int what)
 {
     g_notes.push_back(what);
@@ -152,6 +251,9 @@ int main(int argc, char **argv)
               "candidates: a relative $KAMITE_GAME_LIBRARY is made absolute (dlopen would search for it otherwise)");
     }
 
+    // The PE reader (Windows' file format), from files built here.
+    checkPe(scratch);
+
     // Missing.
     {
         const gl::Result r = gl::load({scratch / "nope.so", scratch / "nope2.so"}, kA);
@@ -163,7 +265,8 @@ int main(int argc, char **argv)
     {
         writeAll(scratch / "text.so", "this is not an ELF file, but it is long enough to hold an ELF header.......");
         const gl::Result text = gl::load({scratch / "text.so"}, kA);
-        check(text.status == gl::Status::NotAGameLibrary && contains(text.message, "not an ELF"), "text file: " + text.message);
+        check(text.status == gl::Status::NotAGameLibrary && contains(text.message, "neither an ELF nor a PE"),
+              "text file: " + text.message);
 
         writeAll(scratch / "short.so", readAll(fixture("fixture_good")).substr(0, 200));
         const gl::Result shortFile = gl::load({scratch / "short.so"}, kA);

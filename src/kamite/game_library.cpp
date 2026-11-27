@@ -1,9 +1,22 @@
 // The split game code's loader (game_library.h).
+//
+// Reading the interface id from the file needs no operating system: an ELF reader and a PE reader on the formats'
+// own layouts (declared here, so both compile and are tested on every platform). Loading needs one: dlopen on Linux,
+// LoadLibraryExW on Windows (osOpen / osSymbol / osClose below).
 
 #include "kamite/game_library.h"
 
+#if defined(_WIN32)
+#ifndef NOMINMAX
+#define NOMINMAX
+#endif
+#ifndef WIN32_LEAN_AND_MEAN
+#define WIN32_LEAN_AND_MEAN
+#endif
+#include <windows.h>
+#else
 #include <dlfcn.h>
-#include <elf.h>
+#endif
 
 #include <cstring>
 #include <fstream>
@@ -56,6 +69,297 @@ namespace kamite::game_library
             r.message = std::move(message);
             return r;
         }
+
+        // The id section's bytes: the prefix, 64 lowercase hex digits, NUL. The id, or "" and why in `error`.
+        std::string idFromSection(const std::string &bytes, const char *sectionName, std::string &error)
+        {
+            const size_t prefixLength = std::strlen(kSectionPrefix);
+            if (bytes.size() < prefixLength + kIdLength + 1 || bytes.compare(0, prefixLength, kSectionPrefix) != 0 ||
+                bytes[prefixLength + kIdLength] != '\0' || !lowerHex(bytes.data() + prefixLength, kIdLength))
+            {
+                error = std::string("has a malformed ") + sectionName + " section";
+                return "";
+            }
+            error.clear();
+            return bytes.substr(prefixLength, kIdLength);
+        }
+
+        // ELF64, little-endian: the fields read here, as the format lays them out (elf.h's Elf64_Ehdr / Elf64_Shdr).
+#pragma pack(push, 1)
+        struct ElfHeader
+        {
+            unsigned char ident[16];
+            uint16_t type, machine;
+            uint32_t version;
+            uint64_t entry, phoff, shoff;
+            uint32_t flags;
+            uint16_t ehsize, phentsize, phnum, shentsize, shnum, shstrndx;
+        };
+        struct ElfSection
+        {
+            uint32_t name, type;
+            uint64_t flags, addr, offset, size;
+            uint32_t link, info;
+            uint64_t addralign, entsize;
+        };
+#pragma pack(pop)
+        static_assert(sizeof(ElfHeader) == 64 && sizeof(ElfSection) == 64, "ELF64 layouts");
+        constexpr uint16_t kElfShared = 3;            // ET_DYN
+        constexpr uint32_t kElfProgbits = 1;          // SHT_PROGBITS
+        constexpr uint16_t kElfExtendedIndex = 0xFFFF; // SHN_XINDEX
+
+        std::string readElf(std::ifstream &in, uint64_t fileSize, std::string &error)
+        {
+            ElfHeader header{};
+            if (!readAt(in, fileSize, 0, &header, sizeof header))
+            {
+                error = "is not an ELF file";
+                return "";
+            }
+            if (header.ident[4] != 2 || header.ident[5] != 1) // ELFCLASS64, ELFDATA2LSB
+            {
+                error = "is not a 64-bit little-endian ELF file";
+                return "";
+            }
+            if (header.type != kElfShared)
+            {
+                error = "is not a shared library";
+                return "";
+            }
+            if (header.shoff == 0 || header.shentsize != sizeof(ElfSection))
+            {
+                error = "has no section table";
+                return "";
+            }
+            // Section 0 holds the real count and string-table index when they do not fit the header (ELF's extended
+            // numbering: a library of a whole game's functions can have more than 0xFF00 sections).
+            ElfSection first{};
+            if (!readAt(in, fileSize, header.shoff, &first, sizeof first))
+            {
+                error = "has a section table past its end";
+                return "";
+            }
+            const uint64_t count = header.shnum != 0 ? header.shnum : first.size;
+            const uint64_t names = header.shstrndx != kElfExtendedIndex ? header.shstrndx : first.link;
+            constexpr uint64_t kMaxSections = 1u << 22;
+            if (count == 0 || count > kMaxSections || names >= count)
+            {
+                error = "has a malformed section table";
+                return "";
+            }
+            // Against the file's size before allocating anything for it.
+            if (header.shoff > fileSize || count * sizeof(ElfSection) > fileSize - header.shoff)
+            {
+                error = "has a section table past its end";
+                return "";
+            }
+            std::vector<ElfSection> sections(static_cast<size_t>(count));
+            if (!readAt(in, fileSize, header.shoff, sections.data(), count * sizeof(ElfSection)))
+            {
+                error = "has a section table past its end";
+                return "";
+            }
+            const ElfSection &nameTable = sections[static_cast<size_t>(names)];
+            constexpr uint64_t kMaxNames = 64u << 20;
+            if (nameTable.size == 0 || nameTable.size > kMaxNames || nameTable.offset > fileSize ||
+                nameTable.size > fileSize - nameTable.offset)
+            {
+                error = "has a malformed section name table";
+                return "";
+            }
+            std::string nameBytes(static_cast<size_t>(nameTable.size), '\0');
+            if (!readAt(in, fileSize, nameTable.offset, nameBytes.data(), nameTable.size))
+            {
+                error = "has a section name table past its end";
+                return "";
+            }
+            const size_t wantedLength = std::strlen(kElfSectionName);
+            const ElfSection *found = nullptr;
+            for (const ElfSection &section : sections)
+            {
+                if (section.name >= nameBytes.size())
+                    continue;
+                const size_t room = nameBytes.size() - section.name;
+                if (room <= wantedLength || std::memcmp(nameBytes.data() + section.name, kElfSectionName, wantedLength + 1) != 0)
+                    continue;
+                if (found)
+                {
+                    error = "has two .ghr_interface sections";
+                    return "";
+                }
+                found = &section;
+            }
+            if (!found)
+            {
+                error = "has no .ghr_interface section (not a GHR game library)";
+                return "";
+            }
+            const uint64_t wantedSize = std::strlen(kSectionPrefix) + kIdLength + 1;
+            if (found->type != kElfProgbits || found->size != wantedSize)
+            {
+                error = "has a malformed .ghr_interface section";
+                return "";
+            }
+            std::string bytes(static_cast<size_t>(wantedSize), '\0');
+            if (!readAt(in, fileSize, found->offset, bytes.data(), wantedSize))
+            {
+                error = "has a .ghr_interface section past its end";
+                return "";
+            }
+            return idFromSection(bytes, ".ghr_interface", error);
+        }
+
+        // PE32+ (x64): the fields read here (winnt.h's IMAGE_FILE_HEADER / IMAGE_SECTION_HEADER).
+#pragma pack(push, 1)
+        struct PeFileHeader
+        {
+            uint16_t machine, numberOfSections;
+            uint32_t timeDateStamp, pointerToSymbolTable, numberOfSymbols;
+            uint16_t sizeOfOptionalHeader, characteristics;
+        };
+        struct PeSection
+        {
+            char name[8];
+            uint32_t virtualSize, virtualAddress, sizeOfRawData, pointerToRawData;
+            uint32_t pointerToRelocations, pointerToLinenumbers;
+            uint16_t numberOfRelocations, numberOfLinenumbers;
+            uint32_t characteristics;
+        };
+#pragma pack(pop)
+        static_assert(sizeof(PeFileHeader) == 20 && sizeof(PeSection) == 40, "PE layouts");
+        constexpr uint16_t kPeAmd64 = 0x8664;  // IMAGE_FILE_MACHINE_AMD64
+        constexpr uint16_t kPeDll = 0x2000;    // IMAGE_FILE_DLL
+        constexpr uint16_t kPe32Plus = 0x20B;  // IMAGE_NT_OPTIONAL_HDR64_MAGIC
+
+        std::string readPe(std::ifstream &in, uint64_t fileSize, std::string &error)
+        {
+            uint32_t peOffset = 0; // e_lfanew, at 0x3C of the DOS header
+            char signature[4] = {};
+            PeFileHeader header{};
+            if (!readAt(in, fileSize, 0x3C, &peOffset, sizeof peOffset) || !readAt(in, fileSize, peOffset, signature, 4) ||
+                std::memcmp(signature, "PE\0\0", 4) != 0 || !readAt(in, fileSize, uint64_t(peOffset) + 4, &header, sizeof header))
+            {
+                error = "is not a PE file";
+                return "";
+            }
+            uint16_t optionalMagic = 0;
+            const uint64_t optionalOffset = uint64_t(peOffset) + 4 + sizeof header;
+            if (header.machine != kPeAmd64 || !(header.characteristics & kPeDll) ||
+                !readAt(in, fileSize, optionalOffset, &optionalMagic, sizeof optionalMagic) || optionalMagic != kPe32Plus)
+            {
+                error = "is not a 64-bit Windows DLL";
+                return "";
+            }
+            const uint64_t tableOffset = optionalOffset + header.sizeOfOptionalHeader;
+            const uint64_t count = header.numberOfSections;
+            if (count == 0 || tableOffset > fileSize || count * sizeof(PeSection) > fileSize - tableOffset)
+            {
+                error = "has a section table past its end";
+                return "";
+            }
+            std::vector<PeSection> sections(static_cast<size_t>(count));
+            if (!readAt(in, fileSize, tableOffset, sections.data(), count * sizeof(PeSection)))
+            {
+                error = "has a section table past its end";
+                return "";
+            }
+            // The name is 8 bytes, NUL-padded (".ghrid" fits; a longer one would be truncated in an image).
+            char wanted[8] = {};
+            std::memcpy(wanted, kPeSectionName, std::strlen(kPeSectionName));
+            const PeSection *found = nullptr;
+            for (const PeSection &section : sections)
+            {
+                if (std::memcmp(section.name, wanted, sizeof wanted) != 0)
+                    continue;
+                if (found)
+                {
+                    error = "has two .ghrid sections";
+                    return "";
+                }
+                found = &section;
+            }
+            if (!found)
+            {
+                error = "has no .ghrid section (not a GHR game library)";
+                return "";
+            }
+            // VirtualSize is the data's own size; SizeOfRawData is it rounded up to the file alignment.
+            const uint64_t wantedSize = std::strlen(kSectionPrefix) + kIdLength + 1;
+            if (found->virtualSize < wantedSize || found->sizeOfRawData < wantedSize)
+            {
+                error = "has a malformed .ghrid section";
+                return "";
+            }
+            std::string bytes(static_cast<size_t>(wantedSize), '\0');
+            if (!readAt(in, fileSize, found->pointerToRawData, bytes.data(), wantedSize))
+            {
+                error = "has a .ghrid section past its end";
+                return "";
+            }
+            return idFromSection(bytes, ".ghrid", error);
+        }
+
+        // The operating system's half: open, look up, close. The error text for the log when open fails.
+#if defined(_WIN32)
+        std::string lastError()
+        {
+            const DWORD code = GetLastError();
+            char *text = nullptr;
+            FormatMessageA(FORMAT_MESSAGE_ALLOCATE_BUFFER | FORMAT_MESSAGE_FROM_SYSTEM | FORMAT_MESSAGE_IGNORE_INSERTS,
+                           nullptr, code, 0, reinterpret_cast<char *>(&text), 0, nullptr);
+            std::string message = text ? text : "LoadLibrary failed";
+            if (text)
+                LocalFree(text);
+            while (!message.empty() && (message.back() == '\n' || message.back() == '\r' || message.back() == ' '))
+                message.pop_back();
+            return message + " (error " + std::to_string(code) + ")";
+        }
+
+        void *osOpen(const fs::path &path, std::string &error)
+        {
+            // Every import (from GHR.exe and the C runtime) is resolved here, as RTLD_NOW does; the library's own
+            // dependencies are looked for next to it.
+            HMODULE module = LoadLibraryExW(path.wstring().c_str(), nullptr, LOAD_WITH_ALTERED_SEARCH_PATH);
+            if (!module)
+                error = lastError();
+            return reinterpret_cast<void *>(module);
+        }
+
+        void *osSymbol(void *handle, const char *name)
+        {
+            return reinterpret_cast<void *>(GetProcAddress(reinterpret_cast<HMODULE>(handle), name));
+        }
+
+        void osClose(void *handle)
+        {
+            FreeLibrary(reinterpret_cast<HMODULE>(handle));
+        }
+#else
+        void *osOpen(const fs::path &path, std::string &error)
+        {
+            // RTLD_NOW: every symbol the library needs from GHR is resolved here, so a missing one is this error and
+            // not a crash in the middle of the game. RTLD_LOCAL: its own symbols stay out of the global scope.
+            dlerror();
+            void *handle = dlopen(path.c_str(), RTLD_NOW | RTLD_LOCAL);
+            if (!handle)
+            {
+                const char *why = dlerror();
+                error = why ? why : "dlopen failed";
+            }
+            return handle;
+        }
+
+        void *osSymbol(void *handle, const char *name)
+        {
+            dlerror();
+            return dlsym(handle, name);
+        }
+
+        void osClose(void *handle)
+        {
+            dlclose(handle);
+        }
+#endif
     }
 
     const char *statusName(Status status)
@@ -80,8 +384,8 @@ namespace kamite::game_library
     {
         if (environment && *environment)
         {
-            // Absolute: dlopen searches the library paths for a name without a slash, so a relative name could be
-            // checked here as one file and loaded as another.
+            // Absolute: dlopen and LoadLibrary search their paths for a bare name, so a relative name could be checked
+            // here as one file and loaded as another.
             std::error_code ec;
             const fs::path absolute = fs::absolute(environment, ec);
             return {ec ? fs::path(environment) : absolute};
@@ -105,115 +409,18 @@ namespace kamite::game_library
             return "";
         }
         const uint64_t fileSize = static_cast<uint64_t>(end);
+        char magic[4] = {};
+        if (readAt(in, fileSize, 0, magic, 4) && std::memcmp(magic, "\x7f" "ELF", 4) == 0)
+            return readElf(in, fileSize, error);
+        if (readAt(in, fileSize, 0, magic, 2) && magic[0] == 'M' && magic[1] == 'Z')
+            return readPe(in, fileSize, error);
+        error = "is not a shared library (neither an ELF nor a PE file)";
+        return "";
+    }
 
-        Elf64_Ehdr header{};
-        if (!readAt(in, fileSize, 0, &header, sizeof header) || std::memcmp(header.e_ident, ELFMAG, SELFMAG) != 0)
-        {
-            error = "is not an ELF file";
-            return "";
-        }
-        if (header.e_ident[EI_CLASS] != ELFCLASS64 || header.e_ident[EI_DATA] != ELFDATA2LSB)
-        {
-            error = "is not a 64-bit little-endian ELF file";
-            return "";
-        }
-        if (header.e_type != ET_DYN)
-        {
-            error = "is not a shared library";
-            return "";
-        }
-        if (header.e_shoff == 0 || header.e_shentsize != sizeof(Elf64_Shdr))
-        {
-            error = "has no section table";
-            return "";
-        }
-
-        // Section 0 holds the real count and string-table index when they do not fit the header (ELF's extended
-        // numbering: a library of a whole game's functions can have more than 0xFF00 sections).
-        Elf64_Shdr first{};
-        if (!readAt(in, fileSize, header.e_shoff, &first, sizeof first))
-        {
-            error = "has a section table past its end";
-            return "";
-        }
-        const uint64_t count = header.e_shnum != 0 ? header.e_shnum : first.sh_size;
-        const uint64_t names = header.e_shstrndx != SHN_XINDEX ? header.e_shstrndx : first.sh_link;
-        constexpr uint64_t kMaxSections = 1u << 22;
-        if (count == 0 || count > kMaxSections || names >= count)
-        {
-            error = "has a malformed section table";
-            return "";
-        }
-        // Against the file's size before allocating anything for it.
-        if (header.e_shoff > fileSize || count * sizeof(Elf64_Shdr) > fileSize - header.e_shoff)
-        {
-            error = "has a section table past its end";
-            return "";
-        }
-        std::vector<Elf64_Shdr> sections(static_cast<size_t>(count));
-        if (!readAt(in, fileSize, header.e_shoff, sections.data(), count * sizeof(Elf64_Shdr)))
-        {
-            error = "has a section table past its end";
-            return "";
-        }
-        const Elf64_Shdr &nameTable = sections[static_cast<size_t>(names)];
-        constexpr uint64_t kMaxNames = 64u << 20;
-        if (nameTable.sh_size == 0 || nameTable.sh_size > kMaxNames || nameTable.sh_offset > fileSize ||
-            nameTable.sh_size > fileSize - nameTable.sh_offset)
-        {
-            error = "has a malformed section name table";
-            return "";
-        }
-        std::string nameBytes(static_cast<size_t>(nameTable.sh_size), '\0');
-        if (!readAt(in, fileSize, nameTable.sh_offset, nameBytes.data(), nameTable.sh_size))
-        {
-            error = "has a section name table past its end";
-            return "";
-        }
-
-        const size_t wantedLength = std::strlen(kSectionName);
-        const Elf64_Shdr *found = nullptr;
-        for (const Elf64_Shdr &section : sections)
-        {
-            if (section.sh_name >= nameBytes.size())
-                continue;
-            const char *name = nameBytes.data() + section.sh_name;
-            const size_t room = nameBytes.size() - section.sh_name;
-            if (room <= wantedLength || std::memcmp(name, kSectionName, wantedLength + 1) != 0)
-                continue;
-            if (found)
-            {
-                error = "has two .ghr_interface sections";
-                return "";
-            }
-            found = &section;
-        }
-        if (!found)
-        {
-            error = "has no .ghr_interface section (not a GHR game library)";
-            return "";
-        }
-        const size_t prefixLength = std::strlen(kSectionPrefix);
-        const uint64_t wantedSize = prefixLength + kIdLength + 1;
-        if (found->sh_type != SHT_PROGBITS || found->sh_size != wantedSize)
-        {
-            error = "has a malformed .ghr_interface section";
-            return "";
-        }
-        std::string bytes(static_cast<size_t>(wantedSize), '\0');
-        if (!readAt(in, fileSize, found->sh_offset, bytes.data(), wantedSize))
-        {
-            error = "has a .ghr_interface section past its end";
-            return "";
-        }
-        if (bytes.compare(0, prefixLength, kSectionPrefix) != 0 || bytes.back() != '\0' ||
-            !lowerHex(bytes.data() + prefixLength, kIdLength))
-        {
-            error = "has a malformed .ghr_interface section";
-            return "";
-        }
-        error.clear();
-        return bytes.substr(prefixLength, kIdLength);
+    void *findSymbol(void *handle, const char *name)
+    {
+        return handle && name ? osSymbol(handle, name) : nullptr;
     }
 
     Result load(const std::vector<fs::path> &paths, const std::string &expectedId)
@@ -241,21 +448,14 @@ namespace kamite::game_library
                           path.string() + " was built for another version of GHR (its interface " + shortId(id) +
                               ", this GHR's " + shortId(expectedId) + "): build the game's code again");
 
-        // RTLD_NOW: every symbol the library needs from GHR is resolved here, so a missing one is this error and not
-        // a crash in the middle of the game. RTLD_LOCAL: its own symbols stay out of the global scope.
-        dlerror();
-        void *handle = dlopen(path.c_str(), RTLD_NOW | RTLD_LOCAL);
+        void *handle = osOpen(path, error);
         if (!handle)
-        {
-            const char *why = dlerror();
-            return refuse(Status::LoadFailed, path, path.string() + " cannot be loaded: " + (why ? why : "dlopen failed"));
-        }
+            return refuse(Status::LoadFailed, path, path.string() + " cannot be loaded: " + error);
         using EntryFunction = const Entry *(*)();
-        dlerror();
-        auto entryFunction = reinterpret_cast<EntryFunction>(dlsym(handle, kEntrySymbol));
+        auto entryFunction = reinterpret_cast<EntryFunction>(osSymbol(handle, kEntrySymbol));
         if (!entryFunction)
         {
-            dlclose(handle);
+            osClose(handle);
             return refuse(Status::NotAGameLibrary, path, path.string() + " has no " + kEntrySymbol + "()");
         }
         const Entry *entry = entryFunction();
@@ -263,20 +463,20 @@ namespace kamite::game_library
             expectedId != entry->interfaceId)
         {
             const std::string said = entry && entry->interfaceId ? shortId(entry->interfaceId) : "none";
-            dlclose(handle);
+            osClose(handle);
             return refuse(Status::Mismatch, path,
                           path.string() + "'s entry names interface " + said + ", not its section's " + shortId(id) +
                               ": build the game's code again");
         }
         if (entry->size < sizeof(Entry))
         {
-            dlclose(handle);
+            osClose(handle);
             return refuse(Status::Mismatch, path, path.string() + " has an older entry layout: build the game's code again");
         }
         if (!entry->functions || entry->slotCount == 0 || entry->end < entry->base ||
             entry->end - entry->base != entry->slotCount * 4ull || !entry->modulePacks)
         {
-            dlclose(handle);
+            osClose(handle);
             return refuse(Status::NotAGameLibrary, path, path.string() + " has an inconsistent function table");
         }
         Result r;
