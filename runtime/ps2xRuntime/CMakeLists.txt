@@ -456,6 +456,7 @@ add_library(ps2_runtime STATIC
     src/lib/ps2_iop_host.cpp
     src/lib/ps2_async_vif.cpp
     src/lib/ps2_memory.cpp
+    src/lib/ps2_shared_state.cpp
     src/lib/ps2_ee_float.cpp
     src/lib/ps2_pad.cpp
     src/lib/ps2_host_input.cpp

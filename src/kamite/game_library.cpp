@@ -283,6 +283,7 @@ namespace kamite::game_library
         r.status = Status::Loaded;
         r.path = path;
         r.entry = entry;
+        r.handle = handle;
         return r; // the handle stays open: the game runs from it until the process ends
     }
 

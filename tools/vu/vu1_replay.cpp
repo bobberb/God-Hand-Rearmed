@@ -163,7 +163,7 @@ static Outcome runOne(const Run &run, std::vector<uint8_t> &code, bool compiled)
     }
     Vu1PacketSink sink;
     sink.forward = false;
-    packetSink = &sink;
+    PS2X_VU1_PACKET_SINK = &sink;
     vu1NormShadow.valid = false;
     const auto t0 = std::chrono::steady_clock::now();
     bool done = false;
@@ -180,7 +180,7 @@ static Outcome runOne(const Run &run, std::vector<uint8_t> &code, bool compiled)
         VU1InterpreterAccess::runLoopWith(vu, code.data(), static_cast<uint32_t>(code.size()), out.data.data(),
                                           static_cast<uint32_t>(out.data.size()), gs, nullptr, run.maxCycles, program);
     g_vuSeconds += std::chrono::duration<double>(std::chrono::steady_clock::now() - t0).count();
-    packetSink = nullptr;
+    PS2X_VU1_PACKET_SINK = nullptr;
     out.state = vu.state();
     out.cycle = cycleOf(vu);
     out.packets = std::move(sink.packets);
@@ -713,10 +713,10 @@ int main(int argc, char **argv)
             g_pairTrace = PairTrace{code.data(), data.data(), reinterpret_cast<GS *>(gsStorage), runs[i].maxCycles, {}};
             Vu1PacketSink sink;
             sink.forward = false;
-            packetSink = &sink;
+            PS2X_VU1_PACKET_SINK = &sink;
             Vu1FastCtx *none = nullptr;
             VU1InterpreterAccess::fastBlock<0x2ull, 7u>(vu, *none);
-            packetSink = nullptr;
+            PS2X_VU1_PACKET_SINK = nullptr;
             std::printf("run %zu top %u cycles %u\n", i, runs[i].state.state.top, g_pairTrace.pairs.back().second);
             uint32_t last = 0;
             for (const auto &[p, c] : g_pairTrace.pairs)

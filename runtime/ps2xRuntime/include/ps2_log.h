@@ -11,6 +11,8 @@
 #include <string>
 #include <vector>
 
+#include "ps2_runtime_api.h"
+
 #ifndef PS2_RUNTIME_LOGS
 #define PS2_RUNTIME_LOGS 0
 #endif
@@ -41,6 +43,7 @@ struct RuntimeLogEntry
 
 inline constexpr size_t kMaxRuntimeLogEntries = 4096;
 
+#if !PS2X_SHARED_STATE
 inline std::mutex &runtime_log_mutex()
 {
     static std::mutex m;
@@ -64,6 +67,13 @@ inline bool &runtime_log_paused()
     static bool paused = false;
     return paused;
 }
+#else
+// One log for the program and the game library (ps2_runtime_api.h; src/lib/ps2_shared_state.cpp).
+PS2X_RUNTIME_API std::mutex &runtime_log_mutex();
+PS2X_RUNTIME_API std::deque<RuntimeLogEntry> &runtime_log_entries();
+PS2X_RUNTIME_API uint64_t &runtime_log_next_seq();
+PS2X_RUNTIME_API bool &runtime_log_paused();
+#endif
 
 inline void set_runtime_log_paused(bool paused)
 {
@@ -141,6 +151,7 @@ inline void clear_runtime_log_entries()
 
 namespace ps2_log
 {
+#if !PS2X_SHARED_STATE
 inline std::string log_path()
 {
     static std::string path;
@@ -160,6 +171,12 @@ inline int &depth()
     static thread_local int d = 0;
     return d;
 }
+#else
+// One trace file and one depth per thread for both halves (two ofstreams would truncate each other's ps2_log.txt).
+PS2X_RUNTIME_API std::string log_path();
+PS2X_RUNTIME_API std::ostream &log_stream();
+PS2X_RUNTIME_API int &depth();
+#endif
 inline void log_entry(const char *name)
 {
     for (int i = 0; i < depth(); ++i)

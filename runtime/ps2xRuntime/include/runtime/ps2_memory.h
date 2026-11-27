@@ -13,6 +13,7 @@
 
 #include "gs/ps2_gif_arbiter.h"
 #include "ps2_byte_buffer.h"
+#include "ps2_runtime_api.h"
 #include "ps2_listed_packets.h"
 #if defined(_MSC_VER)
 #include <intrin.h>
@@ -81,11 +82,20 @@ inline constexpr uint32_t PS2_FIO_S_IFREG = 0x2000;
 static_assert((PS2_RAM_SIZE & (PS2_RAM_SIZE - 1u)) == 0u, "PS2_RAM_SIZE must be a power of two");
 static_assert(PS2_RAM_MASK == (PS2_RDRAM_SIZE - 1u), "PS2_RAM_MASK must match PS2_RDRAM_SIZE");
 
+#if !PS2X_SHARED_STATE
 inline std::atomic<uint8_t *> &ps2ScratchpadHostPtrStorage()
 {
     static std::atomic<uint8_t *> ptr{nullptr};
     return ptr;
 }
+#else
+// One pointer for the program and the game library (ps2_runtime_api.h): the runtime sets it, the game code reads it.
+extern PS2X_RUNTIME_API std::atomic<uint8_t *> g_ps2ScratchpadHostPtr; // src/lib/ps2_shared_state.cpp
+inline std::atomic<uint8_t *> &ps2ScratchpadHostPtrStorage()
+{
+    return g_ps2ScratchpadHostPtr;
+}
+#endif
 
 inline void ps2SetScratchpadHostPtr(uint8_t *ptr)
 {

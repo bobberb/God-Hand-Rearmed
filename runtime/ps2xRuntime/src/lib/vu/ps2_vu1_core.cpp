@@ -1607,9 +1607,9 @@ void VU1Interpreter::run(uint8_t *vuCode, uint32_t codeSize,
         {
             const uint32_t startPc = m_state.pc;
             Vu1PacketSink sink; // forward = true: the packets still go to the GIF as without the stats
-            packetSink = &sink;
+            PS2X_VU1_PACKET_SINK = &sink;
             VU1InterpreterAccess::runLoop(*this, vuCode, codeSize, vuData, dataSize, gs, memory, maxCycles, true);
-            packetSink = nullptr;
+            PS2X_VU1_PACKET_SINK = nullptr;
             uint64_t fans = 0u, strips = 0u;
             countGifTags(sink.packets, fans, strips);
             ++stats->calls;
@@ -1914,13 +1914,13 @@ bool VU1InterpreterAccess::runVerifiedWith(VU1Interpreter &vu, uint8_t *vuCode, 
 
     Vu1PacketSink realSink;
     realSink.forward = forward;
-    packetSink = &realSink;
+    PS2X_VU1_PACKET_SINK = &realSink;
     const bool realEnded = runLoopWith(vu, vuCode, codeSize, vuData, dataSize, gs, memory, maxCycles, compiled);
     Vu1PacketSink shadowSink;
     shadowSink.forward = false;
-    packetSink = &shadowSink;
+    PS2X_VU1_PACKET_SINK = &shadowSink;
     const bool shadowEnded = runLoopWith(*shadow, vuCode, codeSize, shadowData.data(), dataSize, gs, memory, maxCycles, nullptr);
-    packetSink = nullptr;
+    PS2X_VU1_PACKET_SINK = nullptr;
 
     std::string diff;
     const auto note = [&diff](const std::string &text)
@@ -1974,12 +1974,12 @@ bool VU1InterpreterAccess::runVerifiedWith(VU1Interpreter &vu, uint8_t *vuCode, 
         {
             Vu1PacketSink drop;
             drop.forward = false;
-            packetSink = &drop;
+            PS2X_VU1_PACKET_SINK = &drop;
             auto drainedA = std::make_unique<VU1Interpreter>(vu);
             auto drainedB = std::make_unique<VU1Interpreter>(*shadow);
             drainedA->flushPipelines();
             drainedB->flushPipelines();
-            packetSink = nullptr;
+            PS2X_VU1_PACKET_SINK = nullptr;
             if (drainedA->m_state.mac != drainedB->m_state.mac)
                 note("mac(resolved)");
             if (drainedA->m_state.clip != drainedB->m_state.clip)
@@ -2212,3 +2212,19 @@ bool ps2xVu1LastRunHitBudget()
 {
     return t_vu1BudgetHit;
 }
+
+#if PS2X_SHARED_STATE
+// The VU state the compiled VU code shares with the runtime, defined once here for the program and the game library
+// (ps2_runtime_api.h; ps2_vu1_impl.inl declares them instead of defining them inline).
+namespace vu1_impl
+{
+    PS2X_RUNTIME_API Vu1PacketSink *&packetSinkSlot()
+    {
+        static thread_local Vu1PacketSink *sink = nullptr;
+        return sink;
+    }
+}
+PS2X_RUNTIME_API Vu1NormShadow vu1NormShadow;
+PS2X_RUNTIME_API Vu1NormShadow vu0NormShadow;
+PS2X_RUNTIME_API bool vu0SchedulerClean = false;
+#endif

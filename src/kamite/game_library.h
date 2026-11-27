@@ -84,6 +84,7 @@ namespace kamite::game_library
         std::filesystem::path path; // the library tried ("" when Missing)
         std::string message;        // for the log and the launcher, "" when Loaded
         const Entry *entry = nullptr; // Loaded only; valid for the rest of the process (never unloaded)
+        void *handle = nullptr;       // Loaded only: the dlopen handle (for --check-game-library's probes)
     };
 
     const char *statusName(Status status);
@@ -107,5 +108,9 @@ namespace kamite::game_library
     void use(const Entry *entry);
     // Registers the library's VU1 programs; false (and nothing done) when it has none.
     bool registerVu1Programs();
+    // --check-game-library: compares the runtime state the library sees with GHR's (game_library_shared_state.h),
+    // printing a line per object. 0 = one object each, 1 = at least one differs, -1 = the library has no probe (only
+    // the stand-in carries one). game_library_check.cpp.
+    int checkSharedState(const Result &loaded);
 #endif
 }

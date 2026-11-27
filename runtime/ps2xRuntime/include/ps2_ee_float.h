@@ -25,6 +25,7 @@
 #include <bit>
 #include <cstdint>
 #include <cstring>
+#include "ps2_runtime_api.h"
 
 #if defined(_MSC_VER)
 #define PS2EE_INLINE __forceinline
@@ -46,7 +47,7 @@ namespace ps2ee
     // The multiplier's lost carry (0 / 1) for a round a (its mantissa's low 16 bits 0: 1.0, 0.5, 3.0 ...), by b's low
     // 16 bits: the product is then the chopped one minus k in its last place, where its bits 16-22 (23 with the top
     // bit) are 0 (ps2_ee_float.cpp).
-    extern const uint64_t kRoundCarryBits[1024];
+    extern PS2X_RUNTIME_API const uint64_t kRoundCarryBits[1024];
     PS2EE_INLINE uint32_t roundCarry(uint32_t b)
     {
         return uint32_t(kRoundCarryBits[(b & 0xFFFFu) >> 6] >> (b & 63u)) & 1u;
