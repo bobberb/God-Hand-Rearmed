@@ -15,8 +15,13 @@ So the headers the game code compiles against must hold no such definition, unle
 Everything else fails the gate, with file:line.
 
 This is the fast source-level half of the gate: it reads lines, not C++. It cannot see a variable a macro expands to
-or a variable template; tools/linux/check_shared_symbols.py, the other half, asks the compiler instead (every
-header compiled into one object with -fkeep-inline-functions, its shared data symbols against an allow-list).
+or a variable template; it skips a declaration with a parenthesis before its '=' (a direct-initialized static,
+`static std::ofstream f(path());`, or a type such as `std::function<void()>`), and a function body whose '{' is on
+the line after a multi-line signature. tools/linux/check_shared_symbols.py, the other half, asks the compiler instead
+(every header compiled into one object with -fkeep-inline-functions, its shared data symbols against an allow-list),
+which sees all of those where they are compiled: not in a function template nothing instantiates, an inline variable
+nothing uses, or a branch the object is not built for (_MSC_VER, AGRESSIVE_LOGS). A static in those places passes
+both halves; none is in the headers today.
 
 The headers: every header and .inl under the runtime's and the IOP's include folders and the runtime's vu/ and
 Kernel/Stubs/ folders (the interface id's set, src/CMakeLists.txt), plus src/kamite/module_registry.h.

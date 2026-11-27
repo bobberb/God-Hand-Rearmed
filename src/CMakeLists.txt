@@ -709,16 +709,17 @@ if(KAMITE_SPLIT_GAME_CODE)
         add_test(NAME split_game_library COMMAND kamite --check-game-library)
         set_tests_properties(split_game_library PROPERTIES
             ENVIRONMENT "KAMITE_GAME_LIBRARY=$<TARGET_FILE:ghr_game>;KAMITE_HOME=${CMAKE_BINARY_DIR}/split_game_library_home"
-            PASS_REGULAR_EXPRESSION "shared state: 7 of 7 one object")
+            PASS_REGULAR_EXPRESSION "shared state: 9 of 9 one object")
         # Windows' rule on Linux: a DLL never shares a header-defined static with the program. The same library linked
-        # with -Bsymbolic binds its own data the same way, so state left in a header (instead of behind
-        # PS2X_SHARED_STATE, ps2_runtime_api.h) shows here as two copies, as it would on Windows.
+        # with -Bsymbolic binds its own data the same way, so one of the 9 probed objects left in a header (instead of
+        # behind PS2X_SHARED_STATE, ps2_runtime_api.h) shows here as two copies, as it would on Windows. Except a
+        # thread_local one (the packet sink): -Bsymbolic does not separate those; shared_state_symbols covers it.
         kamite_game_library(ghr_game_local)
         target_link_options(ghr_game_local PRIVATE -Wl,-Bsymbolic)
         add_test(NAME split_shared_state_windows_rule COMMAND kamite --check-game-library)
         set_tests_properties(split_shared_state_windows_rule PROPERTIES
             ENVIRONMENT "KAMITE_GAME_LIBRARY=$<TARGET_FILE:ghr_game_local>;KAMITE_HOME=${CMAKE_BINARY_DIR}/split_shared_state_home"
-            PASS_REGULAR_EXPRESSION "shared state: 7 of 7 one object")
+            PASS_REGULAR_EXPRESSION "shared state: 9 of 9 one object")
     endif()
 endif()
 
@@ -744,6 +745,9 @@ if(KAMITE_BUILD_TESTS AND CMAKE_SYSTEM_NAME STREQUAL "Linux" AND NOT ANDROID)
                 COMMAND "${Python3_EXECUTABLE}" -I "${CMAKE_SOURCE_DIR}/tools/linux/check_shared_symbols.py"
                         "${CMAKE_NM}" "$<TARGET_OBJECTS:ghr_shared_state_tu>"
                         "${CMAKE_SOURCE_DIR}/tools/linux/shared_state_allowlist.txt")
+        else()
+            message(STATUS "Kamite: shared_state_symbols not registered (needs GCC for -fkeep-inline-functions and CMake "
+                           "3.27; this build: ${CMAKE_CXX_COMPILER_ID}, CMake ${CMAKE_VERSION}); the Nix check runs it")
         endif()
     endif()
 endif()
