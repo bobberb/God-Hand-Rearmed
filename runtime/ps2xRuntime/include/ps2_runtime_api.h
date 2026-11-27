@@ -18,8 +18,9 @@
 // Without PS2X_SHARED_STATE (every build but the split one) it is nothing and the headers keep their inline forms:
 // the normal build's code is unchanged.
 //
-// Kept honest by two checks (src/CMakeLists.txt, every Linux build with tests): tools/linux/check_shared_state.py
-// (the headers' lines) and tools/linux/check_shared_symbols.py (what the compiler emits from them).
+// Kept honest by two checks (src/CMakeLists.txt): tools/linux/check_shared_state.py (the headers' lines; every Linux
+// build with tests) and tools/linux/check_shared_symbols.py (what the compiler emits from them; GCC builds with tests,
+// the Nix check's included: clang has no -fkeep-inline-functions).
 
 #if PS2X_SHARED_STATE
 #if defined(_WIN32)

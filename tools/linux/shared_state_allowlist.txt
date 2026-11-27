@@ -5,7 +5,7 @@
 
 # The C++ library's own: every module has its copy on every platform.
 DW\.ref\.__gxx_personality_v0  # the exception personality routine's reference, per module by design
-std::.*  # the C++ library's internal statics and constants (std::strong_ordering, the special functions' tables)
+std::.*  # the C++ library's own statics and constants (tables, std::strong_ordering). One is real state, libstdc++'s atomic wait pool (__waiter_pool_base::_S_for): one per module only matters for a MinGW/libstdc++ Windows build, not MSVC
 (?:typeinfo|typeinfo name|vtable) for (?:std::|__gnu_cxx::).*  # the C++ library's RTTI and vtables, per module
 
 # RTTI and vtables of the runtime's own classes: per module on Windows too; MSVC matches a caught exception's type by
