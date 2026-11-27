@@ -725,3 +725,29 @@ if(KAMITE_SPLIT_GAME_CODE)
             PASS_REGULAR_EXPRESSION "shared state: 7 of 7 one object")
     endif()
 endif()
+
+# The shared-state gate (ps2_runtime_api.h), in every Linux build with tests (the Nix check's included), split or not:
+# the state the game code shares with the runtime must be defined once, or a Windows game DLL keeps its own copy.
+#   shared_state_headers  the source half: the game code's headers' lines (tools/linux/check_shared_state.py)
+#   shared_state_symbols  the compiler half: every header compiled into one object as the split build's game code sees
+#                         them, every inline function emitted (GCC's -fkeep-inline-functions; clang has no such flag),
+#                         its shared data against tools/linux/shared_state_allowlist.txt (check_shared_symbols.py)
+if(KAMITE_BUILD_TESTS AND CMAKE_SYSTEM_NAME STREQUAL "Linux" AND NOT ANDROID)
+    find_package(Python3 COMPONENTS Interpreter)
+    if(Python3_Interpreter_FOUND)
+        add_test(NAME shared_state_headers
+            COMMAND "${Python3_EXECUTABLE}" -I "${CMAKE_SOURCE_DIR}/tools/linux/check_shared_state.py" "${CMAKE_SOURCE_DIR}")
+        if(CMAKE_CXX_COMPILER_ID STREQUAL "GNU" AND NOT CMAKE_VERSION VERSION_LESS 3.27)
+            add_library(ghr_shared_state_tu OBJECT "${CMAKE_SOURCE_DIR}/tests/unit/shared_state_tu.cpp")
+            target_include_directories(ghr_shared_state_tu PRIVATE
+                "${CMAKE_CURRENT_SOURCE_DIR}" "${KAMITE_GENERATED_DIR}" "${CMAKE_SOURCE_DIR}/runtime/ps2xRuntime/src/lib/vu")
+            target_link_libraries(ghr_shared_state_tu PRIVATE $<COMPILE_ONLY:ps2_runtime>)
+            target_compile_definitions(ghr_shared_state_tu PRIVATE PS2X_SHARED_STATE=1 PS2X_GAME_CODE=1)
+            target_compile_options(ghr_shared_state_tu PRIVATE -fkeep-inline-functions)
+            add_test(NAME shared_state_symbols
+                COMMAND "${Python3_EXECUTABLE}" -I "${CMAKE_SOURCE_DIR}/tools/linux/check_shared_symbols.py"
+                        "${CMAKE_NM}" "$<TARGET_OBJECTS:ghr_shared_state_tu>"
+                        "${CMAKE_SOURCE_DIR}/tools/linux/shared_state_allowlist.txt")
+        endif()
+    endif()
+endif()

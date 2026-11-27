@@ -90,6 +90,38 @@ class Finds(unittest.TestCase):
         self.assertEqual(findings(text), [(4, "inline variable")])
 
 
+class FindsTheReviewersForms(unittest.TestCase):
+    """The forms a review (Nov 27) showed the first version missing: each one must now be found."""
+
+    CASES = {
+        "one-line accessor": 'inline int &counter() { static int c = 0; return c; }',
+        "thread_local without static": 'inline void f()\n{\n    thread_local int buf = 0;\n    (void)buf;\n}',
+        "alignas": 'inline void f()\n{\n    alignas(16) static float buf[4];\n    (void)buf;\n}',
+        "attribute": 'inline void f()\n{\n    [[maybe_unused]] static int n = 0;\n}',
+        "declaration over two lines": 'inline std::atomic<int> &f()\n{\n    static std::atomic<int>\n        n{0};\n    return n;\n}',
+        "template static member": 'template <class T> struct S { static int n; };\ntemplate <class T> int S<T>::n = 0;',
+        'extern "C" variable': 'extern "C" int g_cdata;',
+        "#ifndef's other branch": '#ifndef PS2X_SHARED_STATE\n#else\ninline int g_x = 0;\n#endif',
+        "one-line class": 'struct Q { static int k; };',
+        "static member in an override": 'struct D : B\n{\n    int g() override\n    {\n        static int x = 0;\n        return x;\n    }\n};',
+        "lambda": 'inline auto f = [] { static int c = 0; return ++c; };',
+        "extern over two lines": 'extern std::atomic<int>\n    g_multi;',
+        "class thread_local member": 'struct T\n{\n    static thread_local int t;\n};',
+        "template function's static": 'template <class T>\nT &inst()\n{\n    static T t;\n    return t;\n}',
+        "two variables": 'inline int g_a = 0, g_b = 0;',
+        "one-line namespace": 'namespace n { inline int g_v = 0; }',
+    }
+
+    def test_each(self):
+        for name, text in self.CASES.items():
+            with self.subTest(name):
+                self.assertTrue(findings(text + "\n"), f"not found: {name}")
+
+    def test_normal_build_branch_spelled_with_defined(self):
+        self.assertEqual(findings('#if !defined(PS2X_SHARED_STATE) || !PS2X_SHARED_STATE\ninline int g_ok = 0;\n#endif\n'),
+                         [])
+
+
 class LeavesAlone(unittest.TestCase):
     def test_constexpr(self):
         self.assertEqual(findings("inline constexpr int kSize = 4;\nstatic constexpr int kTable[2] = {1, 2};\n"), [])

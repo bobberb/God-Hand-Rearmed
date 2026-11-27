@@ -14,6 +14,10 @@ So the headers the game code compiles against must hold no such definition, unle
     constant table, a debug counter).
 Everything else fails the gate, with file:line.
 
+This is the fast source-level half of the gate: it reads lines, not C++. It cannot see a variable a macro expands to
+or a variable template; tools/linux/check_shared_symbols.py, the other half, asks the compiler instead (every
+header compiled into one object with -fkeep-inline-functions, its shared data symbols against an allow-list).
+
 The headers: every header and .inl under the runtime's and the IOP's include folders and the runtime's vu/ and
 Kernel/Stubs/ folders (the interface id's set, src/CMakeLists.txt), plus src/kamite/module_registry.h.
 Exit 0 = clean, 1 = findings (printed), 2 = usage.
@@ -35,8 +39,16 @@ MARKER = "// shared-state:"
 # A definition with storage that each module would get its own copy of.
 INLINE_VARIABLE = re.compile(r"^\s*(?:static\s+)?inline\s+(?:thread_local\s+)?(?!constexpr\b)(?!namespace\b)"
                              r"[A-Za-z_][\w:<>,\s\*&]*?\b[A-Za-z_]\w*\s*(?:\[[^\]]*\])?\s*(?:=|\{|;)")
-STATIC_LOCAL = re.compile(r"^\s+static\s+(?:thread_local\s+)?(?!constexpr\b)(?!inline\b)(?!void\b)(?!assert)"
-                          r"[A-Za-z_][\w:<>,\s\*&]*?\b[A-Za-z_]\w*\s*(?:\[[^\]]*\])*\s*(?:=|\{|;)")
+STATIC_LOCAL = re.compile(r"^\s*(?:static\s+(?:thread_local\s+)?|thread_local\s+(?:static\s+)?)(?!constexpr\b)(?!inline\b)"
+                          r"(?!void\b)(?!assert)[A-Za-z_][\w:<>,\s\*&]*?\b[A-Za-z_]\w*\s*(?:\[[^\]]*\])*\s*(?:=|\{|;|$)")
+# The normal build's branch: `#if !PS2X_SHARED_STATE`, `#ifndef PS2X_SHARED_STATE`, `#if !defined(PS2X_SHARED_STATE)...`.
+NORMAL_ONLY = re.compile(r"(?:if\s+!\s*PS2X_SHARED_STATE\b|ifndef\s+PS2X_SHARED_STATE\b|if\s+!\s*defined\s*\(?\s*PS2X_SHARED_STATE\b)")
+
+
+def normalize(code):
+    """Attributes and alignment specifiers do not change what a declaration is: drop them before matching."""
+    code = re.sub(r"\[\[[^\]]*\]\]", " ", code)
+    return re.sub(r"\balignas\s*\([^)]*\)", " ", code)
 
 
 def strip_comments(line):
@@ -67,16 +79,16 @@ def scan(path: Path, root: Path):
         if stripped.startswith("#"):
             directive = stripped[1:].strip()
             if directive.startswith(("if", "ifdef", "ifndef")):
-                condition.append(bool(re.match(r"if\s+!\s*PS2X_SHARED_STATE\b", directive)))
+                condition.append(bool(NORMAL_ONLY.match(directive)))
             elif directive.startswith(("else", "elif")) and condition:
                 condition[-1] = False
             elif directive.startswith("endif") and condition:
                 condition.pop()
             continue
-        code = strip_comments(line)
+        code = normalize(strip_comments(line))
         normal_only = any(condition)
         marked = MARKER in raw
-        if not normal_only and not marked and re.match(r'^\s*extern\s+(?!"C")', code) \
+        if not normal_only and not marked and re.match(r'^\s*extern\s+(?:"C"\s+)?(?!"C")(?!\{)', code) \
                 and "(" not in code.split("[")[0] and "PS2X_RUNTIME_API" not in code:
             # A variable defined once in the runtime and read by the game code: Windows imports data only through
             # __declspec(dllimport), which PS2X_RUNTIME_API gives it.
@@ -91,6 +103,27 @@ def scan(path: Path, root: Path):
                     findings.append((number, raw.strip(), "static data member"))
             elif STATIC_LOCAL.match(code) and "(" not in code.split("=")[0].split("{")[0]:
                 findings.append((number, raw.strip(), "static local of a header function"))
+            elif re.match(r"^\s*(?:static|thread_local)\s+(?!constexpr\b)(?!inline\b)(?!void\b)(?!assert)", code) \
+                    and "(" not in code and not code.rstrip().endswith((";", ",")):
+                # A declaration that goes on to the next line: `static std::atomic<int>` / `    n{0};`.
+                findings.append((number, raw.strip(), "static local of a header function"))
+            # One-line classes: `struct Q { static int k; };`.
+            if not findings or findings[-1][0] != number:
+                one_line_class = re.search(r"\b(?:struct|class)\s+\w+[^{;]*\{(.*)\}", code)
+                if one_line_class and re.search(r"\bstatic\s+(?!constexpr\b)(?!void\b)(?!assert)[^(;]*;", one_line_class.group(1)):
+                    findings.append((number, raw.strip(), "static data member"))
+            # One-line bodies: `inline int &c() { static int v = 0; return v; }`, `namespace n { inline int v; }`.
+            if not findings or findings[-1][0] != number:
+                opened = re.search(r"(\)\s*(?:const\s*)?(?:noexcept\s*)?(?:->\s*[\w:<>\*&\s]+)?|\bnamespace\s+\w*)\s*\{(.*)", code)
+                if opened:
+                    rest = opened.group(2)
+                    if opened.group(1).lstrip().startswith(")"):
+                        for part in rest.split(";"):
+                            if STATIC_LOCAL.match(" " + part.strip() + ";") and "(" not in part.split("=")[0].split("{")[0]:
+                                findings.append((number, raw.strip(), "static local of a header function"))
+                                break
+                    elif INLINE_VARIABLE.match(rest.strip()) and "(" not in rest.split("=")[0]:
+                        findings.append((number, raw.strip(), "inline variable"))
         # Track function bodies: a line with ')' then '{' (or a '{' line after such a header) opens one.
         if re.search(r"\)\s*(const\s*)?(noexcept\s*)?(->\s*[\w:<>\*&\s]+)?\s*\{", code) or \
                 (pending_function and stripped.startswith("{")):

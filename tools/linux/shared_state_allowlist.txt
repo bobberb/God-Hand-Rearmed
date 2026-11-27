@@ -1,0 +1,26 @@
+# Shared data the game code's headers define that may be one copy per module (tools/linux/check_shared_symbols.py).
+# One entry per line: a regular expression on the demangled name (matched whole), then '  # ' and why that is fine.
+# A name matching no entry fails the check; an entry matching nothing fails it too (delete it).
+# State that the runtime and the game code must share does NOT belong here: define it once (ps2_runtime_api.h).
+
+# The C++ library's own: every module has its copy on every platform.
+DW\.ref\.__gxx_personality_v0  # the exception personality routine's reference, per module by design
+std::.*  # the C++ library's internal statics and constants (std::strong_ordering, the special functions' tables)
+(?:typeinfo|typeinfo name|vtable) for (?:std::|__gnu_cxx::).*  # the C++ library's RTTI and vtables, per module
+
+# RTTI and vtables of the runtime's own classes: per module on Windows too; MSVC matches a caught exception's type by
+# name, so a type thrown in one module is still caught by type in the other.
+(?:typeinfo|typeinfo name|vtable) for ps2x::state::Error  # an exception type: compared by name, see above
+
+# Constant tables: read-only, the same values in every copy.
+VU1InterpreterAccess::kDestMaskBits  # constant table
+VU1InterpreterAccess::kRev4  # constant table
+VU1Interpreter::calculateFmacExactResult\(.*\) const::(?:left|right)  # constant table
+VU1Interpreter::calculateFmacProductSticky\(.*\) const::(?:crossLeft|crossRight)  # constant table
+
+# Marked in the headers ('// shared-state: <why>').
+(?:guard variable for )?VU1InterpreterAccess::simdClipEnabled\(\)::enabled  # an environment flag, read once per module
+VU1InterpreterAccess::vu0LeanCheck\(\)::mode  # an environment setting, read once per module
+VU1InterpreterAccess::executeVu0Lean\(.*\)::(?:calls|reports)  # a debug count; per module is fine
+VU1InterpreterAccess::loadVu0Registers\(.*\)::(?:calls|stale)  # a debug count; per module is fine
+(?:guard variable for )?VU1Interpreter::finishXgkick\(\)::(?:before|extra)  # scratch buffers, cleared on every call
