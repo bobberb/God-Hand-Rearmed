@@ -4,6 +4,7 @@
 #include "kamite/guest_symbols.h"
 #include "kamite/log.h"
 #include "ps2_runtime.h"
+#include "ps2_game_code.h"
 
 #include <algorithm>
 #include <atomic>
@@ -54,21 +55,21 @@ namespace kamite::pcsampler
         // pointer), or pc's 256-byte region outside the table (module code).
         uint32_t owner(uint32_t pc)
         {
-            const uint32_t base = g_ps2RecompiledFunctionTableBase;
-            if (pc < base || pc >= g_ps2RecompiledFunctionTableEnd || (pc & 3u) != 0u)
+            const uint32_t base = PS2X_GAME_TABLE_BASE;
+            if (pc < base || pc >= PS2X_GAME_TABLE_END || (pc & 3u) != 0u)
                 return pc & ~0xFFu;
             static std::unordered_map<uint32_t, uint32_t> cache;
             auto cached = cache.find(pc);
             if (cached != cache.end())
                 return cached->second;
             uint32_t slot = (pc - base) >> 2;
-            const PS2Runtime::RecompiledFunction fn = g_ps2RecompiledFunctionTable[slot];
+            const PS2Runtime::RecompiledFunction fn = PS2X_GAME_TABLE[slot];
             uint32_t result = pc;
             if (fn)
             {
                 // A long run of one pointer is a shared fallback (module code, stubs), not one function: capped.
                 uint32_t steps = 0;
-                while (slot > 0u && steps < 4096u && g_ps2RecompiledFunctionTable[slot - 1u] == fn)
+                while (slot > 0u && steps < 4096u && PS2X_GAME_TABLE[slot - 1u] == fn)
                 {
                     --slot;
                     ++steps;
@@ -379,14 +380,14 @@ namespace kamite::pcsampler
         {
             g_guestByHost.clear();
             g_tokenByStart.clear();
-            const uint32_t count = g_ps2RecompiledFunctionTableSlotCount;
+            const uint32_t count = PS2X_GAME_TABLE_SLOT_COUNT;
             for (uint32_t i = 0; i < count; ++i)
             {
-                const PS2Runtime::RecompiledFunction fn = g_ps2RecompiledFunctionTable[i];
-                if (!fn || (i > 0u && g_ps2RecompiledFunctionTable[i - 1u] == fn))
+                const PS2Runtime::RecompiledFunction fn = PS2X_GAME_TABLE[i];
+                if (!fn || (i > 0u && PS2X_GAME_TABLE[i - 1u] == fn))
                     continue;
                 const uintptr_t host = followThunk(reinterpret_cast<uintptr_t>(fn));
-                const uint32_t guest = g_ps2RecompiledFunctionTableBase + i * 4u;
+                const uint32_t guest = PS2X_GAME_TABLE_BASE + i * 4u;
                 auto [it, fresh] = g_guestByHost.emplace(host, guest);
                 if (!fresh && it->second != guest)
                     it->second = kSkipGuest; // a shared fallback (stubs, module dispatch): no single guest function

@@ -31,6 +31,29 @@ endif()
 
 file(GLOB KAMITE_GENERATED_SOURCES CONFIGURE_DEPENDS "${KAMITE_GENERATED_DIR}/*.cpp")
 
+# The split game code (prototype, Linux; src/kamite/game_library.h, GHR-Tech-Deck issue #1): the generated code goes
+# into libghr_game.so, which GHR loads at start, instead of into GHR. GHR then builds with no game code in it, and the
+# library is built separately (`ninja ghr_game`), as a player's machine would from their own disc. Off: as before.
+option(KAMITE_SPLIT_GAME_CODE "Prototype (Linux): the game code as libghr_game.so, loaded by GHR at start" OFF)
+if(KAMITE_SPLIT_GAME_CODE)
+    if(NOT CMAKE_SYSTEM_NAME STREQUAL "Linux" OR ANDROID)
+        message(FATAL_ERROR "KAMITE_SPLIT_GAME_CODE is Linux only so far (the loader reads ELF and uses dlopen)")
+    endif()
+    if(CMAKE_VERSION VERSION_LESS 3.27)
+        message(FATAL_ERROR "KAMITE_SPLIT_GAME_CODE needs CMake 3.27 or later ($<COMPILE_ONLY:>)")
+    endif()
+    if(KAMITE_GAME_CODE_LIBRARY)
+        message(FATAL_ERROR "KAMITE_SPLIT_GAME_CODE and KAMITE_GAME_CODE_LIBRARY do not go together")
+    endif()
+    # The game code compiles against the runtime's headers but must not link a copy of the runtime into the library:
+    # it takes the runtime from GHR, which exports it (ENABLE_EXPORTS, at the end of this file).
+    set(KAMITE_GAME_RUNTIME "$<COMPILE_ONLY:ps2_runtime>")
+    set(KAMITE_MODULE_INDEX_FUNCTION gameLibraryModulePacks) # game_library_entry.cpp; GHR's modulePacks forwards
+else()
+    set(KAMITE_GAME_RUNTIME ps2_runtime)
+    set(KAMITE_MODULE_INDEX_FUNCTION modulePacks)
+endif()
+
 set(KAMITE_HOST_SOURCES
     main.cpp
     kamite/button_prompt_sheets.cpp
@@ -226,7 +249,7 @@ else()
     file(COPY_FILE "${KAMITE_HUGE_STUB}.tmp" "${KAMITE_HUGE_STUB}" ONLY_IF_DIFFERENT)
     add_library(kamite_game_code_huge STATIC ${KAMITE_HUGE_SOURCES} "${KAMITE_HUGE_STUB}")
     target_include_directories(kamite_game_code_huge PUBLIC "${KAMITE_GENERATED_DIR}")
-    target_link_libraries(kamite_game_code_huge PUBLIC ps2_runtime)
+    target_link_libraries(kamite_game_code_huge PUBLIC ${KAMITE_GAME_RUNTIME})
     # Each huge file needs several GB in MSVC's pass 2; compiling them all at once runs out of heap (C1002).
     set(KAMITE_HUGE_JOBS 2 CACHE STRING "Concurrent compiles of the huge generated sources (Ninja)")
     set_property(GLOBAL APPEND PROPERTY JOB_POOLS kamite_huge=${KAMITE_HUGE_JOBS})
@@ -247,7 +270,7 @@ else()
     add_library(kamite_game_code STATIC ${KAMITE_GENERATED_SOURCES})
     target_link_libraries(kamite_game_code PUBLIC kamite_game_code_huge)
     target_include_directories(kamite_game_code PUBLIC "${KAMITE_GENERATED_DIR}")
-    target_link_libraries(kamite_game_code PUBLIC ps2_runtime)
+    target_link_libraries(kamite_game_code PUBLIC ${KAMITE_GAME_RUNTIME})
     set_target_properties(kamite_game_code PROPERTIES UNITY_BUILD OFF)
     target_precompile_headers(kamite_game_code PRIVATE
         "${KAMITE_RUNTIME_INCLUDE}/ps2_runtime_macros.h"
@@ -304,7 +327,7 @@ set(KAMITE_MODULE_LIBRARIES "")
 if(KAMITE_MODULE_SOURCES)
     add_library(kamite_modules STATIC ${KAMITE_MODULE_SOURCES})
     target_include_directories(kamite_modules PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}")
-    target_link_libraries(kamite_modules PUBLIC ps2_runtime)
+    target_link_libraries(kamite_modules PUBLIC ${KAMITE_GAME_RUNTIME})
     set_target_properties(kamite_modules PROPERTIES UNITY_BUILD OFF)
     target_precompile_headers(kamite_modules PRIVATE
         "${KAMITE_RUNTIME_INCLUDE}/ps2_runtime_macros.h"
@@ -327,7 +350,7 @@ file(WRITE "${KAMITE_MODULE_INDEX}.tmp"
     "namespace kamite\n"
     "{\n"
     "${KAMITE_MODULE_DECLS}"
-    "    const ModulePack *const *modulePacks(size_t &count)\n"
+    "    const ModulePack *const *${KAMITE_MODULE_INDEX_FUNCTION}(size_t &count)\n"
     "    {\n"
     "        static const ModulePack *const packs[] = {${KAMITE_MODULE_REFS}nullptr};\n"
     "        count = ${KAMITE_MODULE_COUNT}u;\n"
@@ -336,7 +359,11 @@ file(WRITE "${KAMITE_MODULE_INDEX}.tmp"
     "}\n")
 file(COPY_FILE "${KAMITE_MODULE_INDEX}.tmp" "${KAMITE_MODULE_INDEX}" ONLY_IF_DIFFERENT)
 
-add_executable(kamite ${KAMITE_HOST_SOURCES} "${KAMITE_MODULE_INDEX}")
+if(KAMITE_SPLIT_GAME_CODE)
+    add_executable(kamite ${KAMITE_HOST_SOURCES}) # the module index goes into the library (end of this file)
+else()
+    add_executable(kamite ${KAMITE_HOST_SOURCES} "${KAMITE_MODULE_INDEX}")
+endif()
 # The native VU1 programs (kamite/render) and native EE functions (kamite/native) round every float operation on its
 # own, as the VU / EE does: no contraction into FMA (MSVC's /fp:precise below does not contract).
 if(NOT MSVC)
@@ -370,7 +397,7 @@ add_custom_target(kamite_git_commit
     BYPRODUCTS "${KAMITE_COMMIT_HEADER}"
     VERBATIM)
 add_dependencies(kamite kamite_git_commit)
-if(KAMITE_MODULE_LIBRARIES)
+if(KAMITE_MODULE_LIBRARIES AND NOT KAMITE_SPLIT_GAME_CODE)
     target_link_libraries(kamite PRIVATE ${KAMITE_MODULE_LIBRARIES})
 endif()
 # The port's own resources (resources/images/logo.png: the launcher's logo, npc_motions, prompts) next to the exe,
@@ -400,7 +427,22 @@ target_include_directories(kamite PRIVATE
     "${CMAKE_CURRENT_SOURCE_DIR}"
     "${CMAKE_CURRENT_BINARY_DIR}/kamite_generated"
     "${KAMITE_GENERATED_DIR}")
-target_link_libraries(kamite PRIVATE kamite_game_code ps2_runtime)
+if(KAMITE_SPLIT_GAME_CODE)
+    # Whole archives: the library's generated code calls runtime functions nothing in GHR calls (ps2_runtime_macros.h's
+    # ps2EeDiv -> ps2ee::div), and a plain static link keeps only the members GHR itself needs. ENABLE_EXPORTS can
+    # export only what was linked. Its own feature, not CMake's WHOLE_ARCHIVE: that one wraps the archive in
+    # --push-state / --pop-state, which zig's linker (the portable toolchain) refuses.
+    set(CMAKE_LINK_LIBRARY_USING_KAMITE_WHOLE_ARCHIVE "LINKER:--whole-archive" "<LINK_ITEM>" "LINKER:--no-whole-archive")
+    set(CMAKE_LINK_LIBRARY_USING_KAMITE_WHOLE_ARCHIVE_SUPPORTED TRUE)
+    # Overrides, not $<LINK_LIBRARY:>: ps2_iop also arrives through ps2_runtime's own link, and every occurrence must
+    # carry the same feature.
+    target_link_libraries(kamite PRIVATE ps2_runtime)
+    set_target_properties(kamite PROPERTIES
+        LINK_LIBRARY_OVERRIDE_ps2_runtime KAMITE_WHOLE_ARCHIVE
+        LINK_LIBRARY_OVERRIDE_ps2_iop KAMITE_WHOLE_ARCHIVE)
+else()
+    target_link_libraries(kamite PRIVATE kamite_game_code ps2_runtime)
+endif()
 target_compile_definitions(kamite PRIVATE KAMITE_RUNTIME_HAS_SET_HEADLESS=${KAMITE_RUNTIME_HAS_SET_HEADLESS})
 
 if(MSVC)
@@ -496,9 +538,11 @@ file(GLOB KAMITE_VU1_SOURCES CONFIGURE_DEPENDS "${KAMITE_GENERATED_DIR}/vu1/*.cp
 if(KAMITE_VU1_SOURCES)
     add_library(kamite_vu1_code STATIC ${KAMITE_VU1_SOURCES})
     target_include_directories(kamite_vu1_code PRIVATE "${CMAKE_SOURCE_DIR}/runtime/ps2xRuntime/src/lib/vu")
-    target_link_libraries(kamite_vu1_code PUBLIC ps2_runtime)
-    target_link_libraries(kamite PRIVATE kamite_vu1_code)
-    target_compile_definitions(kamite PRIVATE KAMITE_HAS_VU1_PROGRAMS=1)
+    target_link_libraries(kamite_vu1_code PUBLIC ${KAMITE_GAME_RUNTIME})
+    if(NOT KAMITE_SPLIT_GAME_CODE)
+        target_link_libraries(kamite PRIVATE kamite_vu1_code)
+        target_compile_definitions(kamite PRIVATE KAMITE_HAS_VU1_PROGRAMS=1)
+    endif()
     if(MSVC)
         target_compile_options(kamite_vu1_code PRIVATE /bigobj /fp:precise ${KAMITE_ARCH_FLAG} /W0 /MP /d2OptimizeHugeFunctions $<$<CONFIG:RelWithDebInfo>:/Ob2>)
     endif()
@@ -508,3 +552,145 @@ set_target_properties(kamite PROPERTIES
     RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/bin"
     VS_DEBUGGER_WORKING_DIRECTORY "${CMAKE_SOURCE_DIR}"
 )
+
+if(KAMITE_SPLIT_GAME_CODE)
+    # The interface id (src/kamite/game_library.h): SHA-256 over everything both halves must agree on, so a library
+    # built against other headers, another compiler or other flags is refused instead of crashing. On purpose a
+    # superset of what the generated code includes (every runtime and IOP header, the VU and stub headers, the port's
+    # two shared headers): a change there that did not matter costs a rebuild, one left out could cost a crash.
+    file(GLOB_RECURSE KAMITE_INTERFACE_FILES CONFIGURE_DEPENDS
+        "${KAMITE_RUNTIME_INCLUDE}/*.h" "${KAMITE_RUNTIME_INCLUDE}/*.inl"
+        "${CMAKE_SOURCE_DIR}/runtime/ps2xIOP/include/*.h"
+        "${CMAKE_SOURCE_DIR}/runtime/ps2xRuntime/src/lib/vu/*.h" "${CMAKE_SOURCE_DIR}/runtime/ps2xRuntime/src/lib/vu/*.inl"
+        "${CMAKE_SOURCE_DIR}/runtime/ps2xRuntime/src/lib/Kernel/Stubs/*.h")
+    list(APPEND KAMITE_INTERFACE_FILES
+        "${CMAKE_CURRENT_SOURCE_DIR}/kamite/module_registry.h" "${CMAKE_CURRENT_SOURCE_DIR}/kamite/game_library.h")
+    list(SORT KAMITE_INTERFACE_FILES)
+    set(KAMITE_INTERFACE_TEXT "")
+    foreach(file IN LISTS KAMITE_INTERFACE_FILES)
+        file(SHA256 "${file}" fileHash)
+        file(RELATIVE_PATH fileName "${CMAKE_SOURCE_DIR}" "${file}")
+        string(APPEND KAMITE_INTERFACE_TEXT "${fileName} ${fileHash}\n")
+    endforeach()
+    # The compiler and how it is driven: the toolchain file (zig's target and glibc version live in its wrappers).
+    if(CMAKE_TOOLCHAIN_FILE AND EXISTS "${CMAKE_TOOLCHAIN_FILE}")
+        list(APPEND KAMITE_INTERFACE_FILES "${CMAKE_TOOLCHAIN_FILE}")
+        foreach(wrapper "${CMAKE_CXX_COMPILER}" "${CMAKE_C_COMPILER}")
+            if(EXISTS "${wrapper}" AND wrapper MATCHES "/tools/linux/")
+                list(APPEND KAMITE_INTERFACE_FILES "${wrapper}")
+            endif()
+        endforeach()
+        foreach(file IN ITEMS "${CMAKE_TOOLCHAIN_FILE}" "${CMAKE_CXX_COMPILER}" "${CMAKE_C_COMPILER}")
+            if(EXISTS "${file}" AND (file STREQUAL CMAKE_TOOLCHAIN_FILE OR file MATCHES "/tools/linux/"))
+                file(SHA256 "${file}" fileHash)
+                get_filename_component(fileName "${file}" NAME) # by name and content: never where it lies
+                string(APPEND KAMITE_INTERFACE_TEXT "toolchain ${fileName} ${fileHash}\n")
+            endif()
+        endforeach()
+    endif()
+    # Every compile definition and option that reaches the generated code or the runtime: the runtime and the two
+    # libraries it passes on, this directory's, and the game targets' own. Unevaluated text (generator expressions
+    # and all): a change in any of it changes the id.
+    string(TOUPPER "${CMAKE_BUILD_TYPE}" KAMITE_BUILD_TYPE_UPPER)
+    string(APPEND KAMITE_INTERFACE_TEXT
+        "compiler ${CMAKE_CXX_COMPILER_ID} ${CMAKE_CXX_COMPILER_VERSION} ${CMAKE_CXX_COMPILER_TARGET}\n"
+        "processor ${CMAKE_SYSTEM_PROCESSOR}\n"
+        "arch ${KAMITE_ARCH}\n"
+        "flags ${CMAKE_CXX_FLAGS} | ${CMAKE_CXX_FLAGS_${KAMITE_BUILD_TYPE_UPPER}}\n")
+    foreach(target ps2_runtime ps2_host_backend ps2_iop)
+        if(TARGET ${target})
+            foreach(property INTERFACE_COMPILE_DEFINITIONS INTERFACE_COMPILE_OPTIONS COMPILE_DEFINITIONS COMPILE_OPTIONS)
+                get_target_property(value ${target} ${property})
+                string(APPEND KAMITE_INTERFACE_TEXT "${target} ${property} ${value}\n")
+            endforeach()
+        endif()
+    endforeach()
+    foreach(target kamite_game_code kamite_game_code_huge kamite_modules kamite_vu1_code)
+        if(TARGET ${target})
+            foreach(property COMPILE_DEFINITIONS COMPILE_OPTIONS)
+                get_target_property(value ${target} ${property})
+                string(APPEND KAMITE_INTERFACE_TEXT "${target} ${property} ${value}\n")
+            endforeach()
+        endif()
+    endforeach()
+    get_directory_property(KAMITE_DIRECTORY_OPTIONS COMPILE_OPTIONS)
+    get_directory_property(KAMITE_DIRECTORY_DEFINITIONS COMPILE_DEFINITIONS)
+    string(APPEND KAMITE_INTERFACE_TEXT "directory ${KAMITE_DIRECTORY_OPTIONS} | ${KAMITE_DIRECTORY_DEFINITIONS}\n")
+    string(APPEND KAMITE_INTERFACE_TEXT "c++ standard ${CMAKE_CXX_STANDARD}\n")
+    # Path-free: CI builds GHR in one folder and the player builds the library in another, from the same sources, and
+    # the two must get the same id. The options carry the checkout's path (-ffile-prefix-map=<source>/=, root
+    # CMakeLists.txt), which says nothing about the interface.
+    # The build folder first: it often lies inside the source folder.
+    string(REPLACE "${CMAKE_BINARY_DIR}" "<build>" KAMITE_INTERFACE_TEXT "${KAMITE_INTERFACE_TEXT}")
+    string(REPLACE "${CMAKE_SOURCE_DIR}" "<source>" KAMITE_INTERFACE_TEXT "${KAMITE_INTERFACE_TEXT}")
+    # Configure again (and so hash again) whenever one of these files changes, not only when the list does.
+    set_property(DIRECTORY APPEND PROPERTY CMAKE_CONFIGURE_DEPENDS ${KAMITE_INTERFACE_FILES})
+    string(SHA256 KAMITE_GAME_INTERFACE "${KAMITE_INTERFACE_TEXT}")
+    set(KAMITE_INTERFACE_HEADER "${CMAKE_CURRENT_BINARY_DIR}/kamite_generated/kamite/game_interface.h")
+    file(WRITE "${KAMITE_INTERFACE_HEADER}.tmp"
+        "// Generated by src/CMakeLists.txt: the split game code's interface id (game_library.h). Its inputs are listed\n"
+        "// in game_interface.txt next to this file. Do not edit.\n"
+        "#pragma once\n"
+        "#define KAMITE_GAME_INTERFACE \"${KAMITE_GAME_INTERFACE}\"\n")
+    file(COPY_FILE "${KAMITE_INTERFACE_HEADER}.tmp" "${KAMITE_INTERFACE_HEADER}" ONLY_IF_DIFFERENT)
+    file(WRITE "${CMAKE_CURRENT_BINARY_DIR}/kamite_generated/kamite/game_interface.txt" "${KAMITE_INTERFACE_TEXT}")
+    string(SUBSTRING "${KAMITE_GAME_INTERFACE}" 0 12 KAMITE_GAME_INTERFACE_SHORT)
+    list(LENGTH KAMITE_INTERFACE_FILES KAMITE_INTERFACE_COUNT)
+    message(STATUS "Kamite: split game code: interface ${KAMITE_GAME_INTERFACE_SHORT} (${KAMITE_INTERFACE_COUNT} headers)")
+
+    # The library: the generated code, the module index and the entry. Not a dependency of GHR: `ninja ghr_game`.
+    add_library(ghr_game SHARED kamite/game_library_entry.cpp "${KAMITE_MODULE_INDEX}")
+    target_include_directories(ghr_game PRIVATE
+        "${CMAKE_CURRENT_SOURCE_DIR}" "${CMAKE_CURRENT_BINARY_DIR}/kamite_generated" "${KAMITE_GENERATED_DIR}")
+    target_link_libraries(ghr_game PRIVATE kamite_game_code ${KAMITE_MODULE_LIBRARIES} $<COMPILE_ONLY:ps2_runtime>)
+    if(TARGET kamite_vu1_code)
+        target_link_libraries(ghr_game PRIVATE kamite_vu1_code)
+        target_compile_definitions(ghr_game PRIVATE KAMITE_GAME_HAS_VU1=1)
+    endif()
+    if(EXISTS "${KAMITE_GENERATED_DIR}/KAMITE_STUB")
+        target_compile_definitions(ghr_game PRIVATE KAMITE_GAME_STAND_IN=1)
+    endif()
+    set_target_properties(ghr_game PROPERTIES LIBRARY_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/bin")
+    # Its own functions bind inside it (game-to-game calls skip the PLT and the start-up lookup), its data does not:
+    # inline statics and inline variables stay one object with GHR's (game_library.h). Not -Bsymbolic, which binds
+    # data too. Where the linker has it: zig's (the portable toolchain) refuses the flag, so there the calls keep
+    # going through the PLT.
+    include(CheckLinkerFlag)
+    check_linker_flag(CXX "-Wl,-Bsymbolic-functions" KAMITE_LINKER_HAS_BSYMBOLIC_FUNCTIONS)
+    if(KAMITE_LINKER_HAS_BSYMBOLIC_FUNCTIONS)
+        target_link_options(ghr_game PRIVATE -Wl,-Bsymbolic-functions)
+    endif()
+    # Its runtime symbols are undefined until GHR loads it, on purpose: -z undefs undoes a -z defs a distro's flags add.
+    check_linker_flag(CXX "-Wl,-z,undefs" KAMITE_LINKER_HAS_Z_UNDEFS)
+    if(KAMITE_LINKER_HAS_Z_UNDEFS)
+        target_link_options(ghr_game PRIVATE -Wl,-z,undefs)
+    endif()
+    foreach(gameTarget kamite_game_code kamite_game_code_huge kamite_modules kamite_vu1_code)
+        if(TARGET ${gameTarget})
+            set_target_properties(${gameTarget} PROPERTIES POSITION_INDEPENDENT_CODE ON)
+        endif()
+    endforeach()
+
+    # GHR: no game code, the loader, and every symbol exported for the library to bind to (-rdynamic).
+    set_target_properties(kamite PROPERTIES ENABLE_EXPORTS ON)
+    target_sources(kamite PRIVATE kamite/game_library.cpp)
+    target_compile_definitions(kamite PRIVATE KAMITE_SPLIT_GAME_CODE=1 PS2X_SPLIT_GAME_CODE=1)
+    target_compile_definitions(ps2_runtime PRIVATE PS2X_SPLIT_GAME_CODE=1)
+    # The runtime's own runner (runtime/ps2xRuntime, its register_functions.cpp) links this runtime too, which now
+    # reads the loaded library's table, never the runner's: it would build and find no function. Refused instead.
+    if(TARGET ps2EntryRunner)
+        set(KAMITE_RUNNER_REFUSAL "${CMAKE_CURRENT_BINARY_DIR}/kamite_generated/split_refuses_runner.h")
+        file(WRITE "${KAMITE_RUNNER_REFUSAL}"
+            "#error ps2EntryRunner cannot run on a runtime built with KAMITE_SPLIT_GAME_CODE (it reads the game library's table)\n")
+        target_compile_options(ps2EntryRunner PRIVATE -include "${KAMITE_RUNNER_REFUSAL}")
+        set_target_properties(ps2EntryRunner PROPERTIES EXCLUDE_FROM_ALL ON)
+    endif()
+
+    # The real pair, every build: GHR loads the library it was built with (tools-free: --check-game-library).
+    if(KAMITE_BUILD_TESTS)
+        add_test(NAME split_game_library COMMAND kamite --check-game-library)
+        set_tests_properties(split_game_library PROPERTIES
+            ENVIRONMENT "KAMITE_GAME_LIBRARY=$<TARGET_FILE:ghr_game>;KAMITE_HOME=${CMAKE_BINARY_DIR}/split_game_library_home"
+            PASS_REGULAR_EXPRESSION "game library: loaded")
+    endif()
+endif()

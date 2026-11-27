@@ -1,5 +1,6 @@
 #include "runtime/ps2_async_vif.h"
 #include "ps2_runtime.h"
+#include "ps2_game_code.h"
 #include "ps2_module_table.h"
 #include "runtime/ps2_save_state.h"
 #include "runtime/ps2_pnach.h"
@@ -1750,23 +1751,28 @@ void PS2Runtime::configureIoPathsFromElf(const std::string &elfPath)
     setIoPaths(paths);
 }
 
+#if PS2X_SPLIT_GAME_CODE
+// ps2_game_code.h: the loaded game library's table, filled by the port's loader before the first lookup.
+ps2x::GameTable ps2x::g_gameTable;
+#endif
+
 namespace
 {
     bool generatedFunctionTableSlot(uint32_t address, uint32_t &slot)
     {
-        if ((address & 3u) != 0u || g_ps2RecompiledFunctionTableSlotCount == 0u)
+        if ((address & 3u) != 0u || PS2X_GAME_TABLE_SLOT_COUNT == 0u)
         {
             return false;
         }
 
-        if (address < g_ps2RecompiledFunctionTableBase || address >= g_ps2RecompiledFunctionTableEnd)
+        if (address < PS2X_GAME_TABLE_BASE || address >= PS2X_GAME_TABLE_END)
         {
             return false;
         }
 
-        const uint32_t offset = address - g_ps2RecompiledFunctionTableBase;
+        const uint32_t offset = address - PS2X_GAME_TABLE_BASE;
         slot = offset >> 2;
-        return slot < g_ps2RecompiledFunctionTableSlotCount;
+        return slot < PS2X_GAME_TABLE_SLOT_COUNT;
     }
 
     // Module table: 64 KB guest pages (16384 slots, 128 KB host) allocated on first use, 512 pages for 32 MB.
@@ -1793,7 +1799,7 @@ namespace
         uint32_t slot = 0u;
         if (generatedFunctionTableSlot(address, slot))
         {
-            return g_ps2RecompiledFunctionTable[slot];
+            return PS2X_GAME_TABLE[slot];
         }
         const ModuleSlot *moduleSlot = moduleFunctionSlot(address);
         return moduleSlot ? moduleSlot->load(std::memory_order_relaxed) : nullptr;
@@ -1806,9 +1812,9 @@ namespace
     // ~5% of the EE samples in K's replays of bb97dcb (claude/gt3-revisited.md "Audit").
     PS2_FORCEINLINE PS2Runtime::RecompiledFunction branchTarget(uint32_t address)
     {
-        const uint32_t offset = address - g_ps2RecompiledFunctionTableBase;
-        if ((offset >> 2) < g_ps2RecompiledFunctionTableSlotCount && (address & 3u) == 0u)
-            return g_ps2RecompiledFunctionTable[offset >> 2];
+        const uint32_t offset = address - PS2X_GAME_TABLE_BASE;
+        if ((offset >> 2) < PS2X_GAME_TABLE_SLOT_COUNT && (address & 3u) == 0u)
+            return PS2X_GAME_TABLE[offset >> 2];
         return anyFunction(address);
     }
 }
@@ -1916,13 +1922,13 @@ bool PS2Runtime::replaceFunction(uint32_t address, RecompiledFunction func)
             return true;
         }
         std::cerr << "[function-table] cannot replace guest PC 0x" << std::hex << address
-                  << ": outside generated dense table [0x" << g_ps2RecompiledFunctionTableBase
-                  << ", 0x" << g_ps2RecompiledFunctionTableEnd << ")"
+                  << ": outside generated dense table [0x" << PS2X_GAME_TABLE_BASE
+                  << ", 0x" << PS2X_GAME_TABLE_END << ")"
                   << std::dec << std::endl;
         return false;
     }
 
-    g_ps2RecompiledFunctionTable[slot] = func;
+    PS2X_GAME_TABLE[slot] = func;
     return true;
 }
 
@@ -1970,8 +1976,8 @@ PS2Runtime::RecompiledFunction PS2Runtime::lookupFunction(uint32_t address)
     }
 
     std::cerr << "Error: No exact recompiled function for guest PC 0x" << std::hex << address
-              << " tableBase=0x" << g_ps2RecompiledFunctionTableBase
-              << " tableEnd=0x" << g_ps2RecompiledFunctionTableEnd
+              << " tableBase=0x" << PS2X_GAME_TABLE_BASE
+              << " tableEnd=0x" << PS2X_GAME_TABLE_END
               << " codeRegion=" << (m_memory.isCodeAddress(address) ? "yes" : "no")
               << " trace=" << formatDispatchHistory()
               << std::dec << std::endl;
