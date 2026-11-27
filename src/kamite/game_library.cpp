@@ -19,6 +19,8 @@
 #endif
 
 #include <cstring>
+#include <cwchar>
+#include <iterator>
 #include <fstream>
 #include <limits>
 #include <system_error>
@@ -27,6 +29,12 @@ namespace fs = std::filesystem;
 
 namespace kamite::game_library
 {
+    std::string pathText(const fs::path &path)
+    {
+        const std::u8string text = path.u8string();
+        return std::string(text.begin(), text.end());
+    }
+
     namespace
     {
         // Read `size` bytes at `offset`, false when the file is shorter (or the range wraps).
@@ -57,7 +65,7 @@ namespace kamite::game_library
         {
             std::string out;
             for (const fs::path &p : paths)
-                out += (out.empty() ? "" : ", ") + p.string();
+                out += (out.empty() ? "" : ", ") + pathText(p);
             return out;
         }
 
@@ -317,9 +325,23 @@ namespace kamite::game_library
 
         void *osOpen(const fs::path &path, std::string &error)
         {
+            // The library imports the runtime from a module named GHR.exe (GHR.lib, src/CMakeLists.txt). In a program
+            // under another name that import would not bind to this process: Windows would look for a GHR.exe to load
+            // (another copy of the runtime, never initialized) or fail. Refused with the reason instead.
+            wchar_t self[32768] = {};
+            const DWORD length = GetModuleFileNameW(nullptr, self, static_cast<DWORD>(std::size(self)));
+            const std::wstring name = fs::path(std::wstring(self, length)).filename().wstring();
+            if (length == 0 || _wcsicmp(name.c_str(), L"GHR.exe") != 0)
+            {
+                error = "the game library imports from GHR.exe, and this program is " + pathText(fs::path(name)) +
+                        ": keep the program's name GHR.exe";
+                return nullptr;
+            }
             // Every import (from GHR.exe and the C runtime) is resolved here, as RTLD_NOW does; the library's own
-            // dependencies are looked for next to it.
-            HMODULE module = LoadLibraryExW(path.wstring().c_str(), nullptr, LOAD_WITH_ALTERED_SEARCH_PATH);
+            // dependencies are looked for next to it (LOAD_WITH_ALTERED_SEARCH_PATH wants backslashes).
+            fs::path native = path;
+            native.make_preferred();
+            HMODULE module = LoadLibraryExW(native.wstring().c_str(), nullptr, LOAD_WITH_ALTERED_SEARCH_PATH);
             if (!module)
                 error = lastError();
             return reinterpret_cast<void *>(module);
@@ -442,21 +464,21 @@ namespace kamite::game_library
         std::string error;
         const std::string id = readInterfaceId(path, error);
         if (id.empty())
-            return refuse(Status::NotAGameLibrary, path, path.string() + " " + error);
+            return refuse(Status::NotAGameLibrary, path, pathText(path) + " " + error);
         if (id != expectedId)
             return refuse(Status::Mismatch, path,
-                          path.string() + " was built for another version of GHR (its interface " + shortId(id) +
+                          pathText(path) + " was built for another version of GHR (its interface " + shortId(id) +
                               ", this GHR's " + shortId(expectedId) + "): build the game's code again");
 
         void *handle = osOpen(path, error);
         if (!handle)
-            return refuse(Status::LoadFailed, path, path.string() + " cannot be loaded: " + error);
+            return refuse(Status::LoadFailed, path, pathText(path) + " cannot be loaded: " + error);
         using EntryFunction = const Entry *(*)();
         auto entryFunction = reinterpret_cast<EntryFunction>(osSymbol(handle, kEntrySymbol));
         if (!entryFunction)
         {
             osClose(handle);
-            return refuse(Status::NotAGameLibrary, path, path.string() + " has no " + kEntrySymbol + "()");
+            return refuse(Status::NotAGameLibrary, path, pathText(path) + " has no " + kEntrySymbol + "()");
         }
         const Entry *entry = entryFunction();
         if (!entry || !entry->interfaceId || std::strlen(entry->interfaceId) != kIdLength ||
@@ -465,19 +487,19 @@ namespace kamite::game_library
             const std::string said = entry && entry->interfaceId ? shortId(entry->interfaceId) : "none";
             osClose(handle);
             return refuse(Status::Mismatch, path,
-                          path.string() + "'s entry names interface " + said + ", not its section's " + shortId(id) +
+                          pathText(path) + "'s entry names interface " + said + ", not its section's " + shortId(id) +
                               ": build the game's code again");
         }
         if (entry->size < sizeof(Entry))
         {
             osClose(handle);
-            return refuse(Status::Mismatch, path, path.string() + " has an older entry layout: build the game's code again");
+            return refuse(Status::Mismatch, path, pathText(path) + " has an older entry layout: build the game's code again");
         }
         if (!entry->functions || entry->slotCount == 0 || entry->end < entry->base ||
             entry->end - entry->base != entry->slotCount * 4ull || !entry->modulePacks)
         {
             osClose(handle);
-            return refuse(Status::NotAGameLibrary, path, path.string() + " has an inconsistent function table");
+            return refuse(Status::NotAGameLibrary, path, pathText(path) + " has an inconsistent function table");
         }
         Result r;
         r.status = Status::Loaded;
