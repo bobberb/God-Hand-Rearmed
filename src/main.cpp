@@ -112,7 +112,13 @@
 #include <unistd.h>
 #endif
 
-#if KAMITE_HAS_VU1_PROGRAMS
+#if KAMITE_SPLIT_GAME_CODE
+// The game code is a library GHR loads at start (kamite/game_library.h): its VU1 programs come from there.
+#include "kamite/game_interface.h"
+#include "kamite/game_library.h"
+#include "kamite/render/vu1_programs.h"
+#include "ps2_game_code.h"
+#elif KAMITE_HAS_VU1_PROGRAMS
 void registerGeneratedVu1Programs(); // generated/vu1/vu1_programs.cpp (VU1 microcode compiled ahead of time)
 #include "kamite/render/vu1_programs.h"
 #endif
@@ -149,6 +155,10 @@ namespace
     constexpr int kExitCrash = 6;           // unhandled exception, std::terminate or abort (see the [crash] lines)
     constexpr int kExitTestFailed = 7;      // KAMITE_TEST: the scripted run could not be carried out (see the "test:" lines)
     constexpr int kExitTimeLimit = 124;     // KAMITE_TIME_LIMIT_SECONDS reached (same code as GNU timeout)
+#if KAMITE_SPLIT_GAME_CODE
+    constexpr int kExitNoGameCode = 8;    // the game library is missing or not usable (kamite/game_library.h)
+    constexpr int kExitStaleGameCode = 9; // the game library was built for another GHR: build it again
+#endif
 
     const fs::file_time_type g_startFileTime = fs::file_time_type::clock::now();
 
@@ -828,6 +838,12 @@ namespace
                   << "settings: GHR.ini next to GHR.exe (environment variables of the same name win)\n"
                   << "exit codes: 0 ok, 1 init failed, 2 no disc, 3 wrong disc, 4 CPU, 5 missing function (stop), 6 crash, 7 test failed,\n"
                   << "            124 time limit\n";
+#if KAMITE_SPLIT_GAME_CODE
+        std::cout << "split build: the game's code is " << kamite::game_library::kFileName
+                  << " (the play folder's game_code/, or next to GHR; KAMITE_GAME_LIBRARY names another)\n"
+                  << "       kamite --check-game-library     load it and report, no window\n"
+                  << "            8 game code missing or unusable, 9 game code built for another GHR\n";
+#endif
     }
 
     // --prepare (RecompLauncher's setup step, recomplauncher.json "prepare"): no window, nothing else started. GHR.ini
@@ -863,6 +879,56 @@ namespace
         return kExitOk;
     }
 }
+
+#if KAMITE_SPLIT_GAME_CODE
+namespace
+{
+    // The game library (kamite/game_library.h): loaded, checked against this GHR's interface id, and made the
+    // runtime's function table. Once loaded it stays (later calls return it); a refusal is not kept, so a library
+    // built while the launcher was open is found when the player comes back from it. One exception: a library refused
+    // after dlopen (its entry, not its section, disagrees) may stay mapped (GCC's unique symbols pin it), and a rebuild
+    // at the same path then needs GHR restarted.
+    kamite::game_library::Result loadGameLibrary()
+    {
+        namespace gl = kamite::game_library;
+        static gl::Result loaded;
+        if (loaded.status == gl::Status::Loaded)
+            return loaded;
+        gl::Result r = gl::load(gl::candidates(std::getenv("KAMITE_GAME_LIBRARY"), kamite::paths::home(),
+                                               kamite::paths::programDir()),
+                                KAMITE_GAME_INTERFACE);
+        if (r.status == gl::Status::Loaded)
+        {
+            ps2x::g_gameTable = {r.entry->functions, r.entry->base, r.entry->end, r.entry->slotCount};
+            gl::use(r.entry);
+            loaded = r;
+        }
+        return r;
+    }
+
+    int gameLibraryExitCode(const kamite::game_library::Result &r)
+    {
+        using kamite::game_library::Status;
+        return r.status == Status::Loaded ? kExitOk : r.status == Status::Mismatch ? kExitStaleGameCode : kExitNoGameCode;
+    }
+
+    // --check-game-library: what the boot would do with the game library, without a window or a disc.
+    int checkGameLibraryOnly()
+    {
+        const kamite::game_library::Result r = loadGameLibrary();
+        std::printf("game library: %s\n", kamite::game_library::statusName(r.status));
+        if (!r.path.empty())
+            std::printf("path: %s\n", r.path.string().c_str());
+        std::printf("interface: %s\n", KAMITE_GAME_INTERFACE);
+        if (r.entry)
+            std::printf("table: 0x%08X..0x%08X, %u slots%s\n", r.entry->base, r.entry->end, r.entry->slotCount,
+                        (r.entry->flags & kamite::game_library::kFlagStandIn) ? " (stand-in game code)" : "");
+        if (!r.message.empty())
+            std::printf("%s\n", r.message.c_str());
+        return gameLibraryExitCode(r);
+    }
+}
+#endif
 
 namespace kamite
 {
@@ -902,6 +968,9 @@ int main(int argc, char *argv[])
     fs::path iso;
     bool writeSettingsOnly = false;
     bool prepare = false;
+#if KAMITE_SPLIT_GAME_CODE
+    bool checkGameLibrary = false;
+#endif
     for (int i = 1; i < argc; ++i)
     {
         const std::string arg = argv[i];
@@ -923,6 +992,10 @@ int main(int argc, char *argv[])
             writeSettingsOnly = true;
         else if (arg == "--prepare")
             prepare = true;
+#if KAMITE_SPLIT_GAME_CODE
+        else if (arg == "--check-game-library")
+            checkGameLibrary = true;
+#endif
         else if (arg == "--help" || arg == "-h")
         {
             printUsage();
@@ -959,6 +1032,10 @@ int main(int argc, char *argv[])
         return kExitOk;
     if (prepare)
         return prepareOnly(exeDir, iso);
+#if KAMITE_SPLIT_GAME_CODE
+    if (checkGameLibrary)
+        return checkGameLibraryOnly();
+#endif
     redirectOutput();
     const bool headless = envFlag("KAMITE_HEADLESS", false);
 
@@ -1069,6 +1146,9 @@ int main(int argc, char *argv[])
         }
     }
     kamite::DiscCheckResult disc;
+#if KAMITE_SPLIT_GAME_CODE
+    fs::path verifiedIso; // the image `disc` checked
+#endif
     for (;;)
     {
         if (iso.empty())
@@ -1084,10 +1164,37 @@ int main(int argc, char *argv[])
                 return kExitOk;
             continue;
         }
+#if KAMITE_SPLIT_GAME_CODE
+        // The disc check (the boot ELF's hash, the AFS archives) runs once per image, not on every trip back from the
+        // launcher while the game library is missing.
+        if (!disc.ok || iso != verifiedIso)
+        {
+            KM_INFO(Boot, "disc image: " << iso.string());
+            disc = kamite::verifyDiscAndPrepare(iso, cacheDir);
+            verifiedIso = disc.ok ? iso : fs::path();
+        }
+        // The disc is right; the game's code must be built from it before anything runs.
+        if (disc.ok)
+        {
+            const kamite::game_library::Result library = loadGameLibrary();
+            if (library.status == kamite::game_library::Status::Loaded)
+            {
+                KM_INFO(Boot, "game library: " << library.path.string());
+                break;
+            }
+            KM_ERROR(Boot, library.message);
+            if (!launcherAllowed)
+                return gameLibraryExitCode(library);
+            if (!showLauncher(library.message))
+                return kExitOk;
+            continue;
+        }
+#else
         KM_INFO(Boot, "disc image: " << iso.string());
         disc = kamite::verifyDiscAndPrepare(iso, cacheDir);
         if (disc.ok)
             break;
+#endif
         KM_ERROR(Boot, disc.error);
         if (!launcherAllowed)
             return kExitBadDisc;
@@ -1235,7 +1342,10 @@ int main(int argc, char *argv[])
         kamite::native::reserveUnderHooks(runtime); // the pose's natives and observers under its wrappers (before any hook)
         kamite::installHleBindings(runtime); // port_prep/hle-bindings owns the game's table
         kamite::file_layer::install(runtime); // replaced game files (characters::install's) served at the read
-#if KAMITE_HAS_VU1_PROGRAMS
+#if KAMITE_SPLIT_GAME_CODE
+        if (kamite::game_library::registerVu1Programs()) // the library's VU1 code, when it has some
+            kamite::render::registerNativeVu1Programs(); // native programs first where they match (PS2X_VU1_NATIVE=0: off)
+#elif KAMITE_HAS_VU1_PROGRAMS
         registerGeneratedVu1Programs();
         kamite::render::registerNativeVu1Programs(); // native programs first where they match (PS2X_VU1_NATIVE=0: off)
 #endif
