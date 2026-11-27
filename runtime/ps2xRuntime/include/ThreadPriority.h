@@ -24,7 +24,7 @@ namespace ThreadPriority
 
     inline bool Enabled()
     {
-        static const bool enabled = []
+        static const bool enabled = [] // shared-state: an environment flag, read once per module
         {
             const char *value = std::getenv("PS2X_THREAD_PRIORITY");
             return !value || !*value || *value != '0';

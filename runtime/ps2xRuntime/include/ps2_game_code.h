@@ -24,7 +24,7 @@ namespace ps2x
         uint32_t end = 0u;
         uint32_t slotCount = 0u;
     };
-    extern GameTable g_gameTable; // ps2_runtime.cpp
+    extern GameTable g_gameTable; // shared-state: the program's only (ps2_runtime.cpp); the game code never reads it
 }
 #define PS2X_GAME_TABLE (::ps2x::g_gameTable.functions)
 #define PS2X_GAME_TABLE_BASE (::ps2x::g_gameTable.base)

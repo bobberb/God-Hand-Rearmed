@@ -22,7 +22,7 @@ namespace ps2x::listed
 {
     // The VIF executor's fallback count (PS2Memory::runListedPacket): listed packets whose rest had to be gathered
     // (a command split across pieces otherwise than VIFcode | payload). Dev reports print it.
-    inline std::atomic<uint64_t> executorGathers{0};
+    inline std::atomic<uint64_t> executorGathers{0}; // shared-state: written and read in the program only (vif1 interpreter, draw_list)
 
     // A run of guest bytes (inside the RAM backing), in chain order.
     struct Piece

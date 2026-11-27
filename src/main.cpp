@@ -925,6 +925,9 @@ namespace
                         (r.entry->flags & kamite::game_library::kFlagStandIn) ? " (stand-in game code)" : "");
         if (!r.message.empty())
             std::printf("%s\n", r.message.c_str());
+        // One object for the state both halves share (game_library_shared_state.h), where the library can tell.
+        if (r.status == kamite::game_library::Status::Loaded && kamite::game_library::checkSharedState(r) > 0)
+            return kExitNoGameCode;
         return gameLibraryExitCode(r);
     }
 }

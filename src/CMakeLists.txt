@@ -48,6 +48,10 @@ if(KAMITE_SPLIT_GAME_CODE)
     # The game code compiles against the runtime's headers but must not link a copy of the runtime into the library:
     # it takes the runtime from GHR, which exports it (ENABLE_EXPORTS, at the end of this file).
     set(KAMITE_GAME_RUNTIME "$<COMPILE_ONLY:ps2_runtime>")
+    # The state the game code shares with the runtime is defined once, in the program (ps2_runtime_api.h): the
+    # headers' inline statics would be one copy per module on Windows. PUBLIC, so GHR, the runtime and the game code
+    # all compile the same form; the game targets add PS2X_GAME_CODE (they import it).
+    target_compile_definitions(ps2_runtime PUBLIC PS2X_SHARED_STATE=1)
     set(KAMITE_MODULE_INDEX_FUNCTION gameLibraryModulePacks) # game_library_entry.cpp; GHR's modulePacks forwards
 else()
     set(KAMITE_GAME_RUNTIME ps2_runtime)
@@ -554,6 +558,14 @@ set_target_properties(kamite PROPERTIES
 )
 
 if(KAMITE_SPLIT_GAME_CODE)
+    # The game code imports the runtime's shared state (ps2_runtime_api.h: dllimport on Windows). Before the id, which
+    # hashes the game targets' definitions.
+    foreach(gameTarget kamite_game_code kamite_game_code_huge kamite_modules kamite_vu1_code)
+        if(TARGET ${gameTarget})
+            target_compile_definitions(${gameTarget} PRIVATE PS2X_GAME_CODE=1)
+        endif()
+    endforeach()
+
     # The interface id (src/kamite/game_library.h): SHA-256 over everything both halves must agree on, so a library
     # built against other headers, another compiler or other flags is refused instead of crashing. On purpose a
     # superset of what the generated code includes (every runtime and IOP header, the VU and stub headers, the port's
@@ -642,32 +654,37 @@ if(KAMITE_SPLIT_GAME_CODE)
     message(STATUS "Kamite: split game code: interface ${KAMITE_GAME_INTERFACE_SHORT} (${KAMITE_INTERFACE_COUNT} headers)")
 
     # The library: the generated code, the module index and the entry. Not a dependency of GHR: `ninja ghr_game`.
-    add_library(ghr_game SHARED kamite/game_library_entry.cpp "${KAMITE_MODULE_INDEX}")
-    target_include_directories(ghr_game PRIVATE
-        "${CMAKE_CURRENT_SOURCE_DIR}" "${CMAKE_CURRENT_BINARY_DIR}/kamite_generated" "${KAMITE_GENERATED_DIR}")
-    target_link_libraries(ghr_game PRIVATE kamite_game_code ${KAMITE_MODULE_LIBRARIES} $<COMPILE_ONLY:ps2_runtime>)
-    if(TARGET kamite_vu1_code)
-        target_link_libraries(ghr_game PRIVATE kamite_vu1_code)
-        target_compile_definitions(ghr_game PRIVATE KAMITE_GAME_HAS_VU1=1)
-    endif()
-    if(EXISTS "${KAMITE_GENERATED_DIR}/KAMITE_STUB")
-        target_compile_definitions(ghr_game PRIVATE KAMITE_GAME_STAND_IN=1)
-    endif()
-    set_target_properties(ghr_game PROPERTIES LIBRARY_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/bin")
+    include(CheckLinkerFlag)
     # Its own functions bind inside it (game-to-game calls skip the PLT and the start-up lookup), its data does not:
     # inline statics and inline variables stay one object with GHR's (game_library.h). Not -Bsymbolic, which binds
     # data too. Where the linker has it: zig's (the portable toolchain) refuses the flag, so there the calls keep
     # going through the PLT.
-    include(CheckLinkerFlag)
     check_linker_flag(CXX "-Wl,-Bsymbolic-functions" KAMITE_LINKER_HAS_BSYMBOLIC_FUNCTIONS)
-    if(KAMITE_LINKER_HAS_BSYMBOLIC_FUNCTIONS)
-        target_link_options(ghr_game PRIVATE -Wl,-Bsymbolic-functions)
-    endif()
     # Its runtime symbols are undefined until GHR loads it, on purpose: -z undefs undoes a -z defs a distro's flags add.
     check_linker_flag(CXX "-Wl,-z,undefs" KAMITE_LINKER_HAS_Z_UNDEFS)
-    if(KAMITE_LINKER_HAS_Z_UNDEFS)
-        target_link_options(ghr_game PRIVATE -Wl,-z,undefs)
-    endif()
+    function(kamite_game_library name)
+        add_library(${name} SHARED kamite/game_library_entry.cpp "${KAMITE_MODULE_INDEX}")
+        target_include_directories(${name} PRIVATE
+            "${CMAKE_CURRENT_SOURCE_DIR}" "${CMAKE_CURRENT_BINARY_DIR}/kamite_generated" "${KAMITE_GENERATED_DIR}"
+            "${CMAKE_SOURCE_DIR}/runtime/ps2xRuntime/src/lib/vu") # game_library_shared_state.h: ps2_vu1_impl.inl
+        target_link_libraries(${name} PRIVATE kamite_game_code ${KAMITE_MODULE_LIBRARIES} $<COMPILE_ONLY:ps2_runtime>)
+        target_compile_definitions(${name} PRIVATE PS2X_GAME_CODE=1)
+        if(TARGET kamite_vu1_code)
+            target_link_libraries(${name} PRIVATE kamite_vu1_code)
+            target_compile_definitions(${name} PRIVATE KAMITE_GAME_HAS_VU1=1)
+        endif()
+        if(EXISTS "${KAMITE_GENERATED_DIR}/KAMITE_STUB")
+            target_compile_definitions(${name} PRIVATE KAMITE_GAME_STAND_IN=1)
+        endif()
+        set_target_properties(${name} PROPERTIES LIBRARY_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/bin")
+        if(KAMITE_LINKER_HAS_BSYMBOLIC_FUNCTIONS)
+            target_link_options(${name} PRIVATE -Wl,-Bsymbolic-functions)
+        endif()
+        if(KAMITE_LINKER_HAS_Z_UNDEFS)
+            target_link_options(${name} PRIVATE -Wl,-z,undefs)
+        endif()
+    endfunction()
+    kamite_game_library(ghr_game)
     foreach(gameTarget kamite_game_code kamite_game_code_huge kamite_modules kamite_vu1_code)
         if(TARGET ${gameTarget})
             set_target_properties(${gameTarget} PROPERTIES POSITION_INDEPENDENT_CODE ON)
@@ -676,7 +693,8 @@ if(KAMITE_SPLIT_GAME_CODE)
 
     # GHR: no game code, the loader, and every symbol exported for the library to bind to (-rdynamic).
     set_target_properties(kamite PROPERTIES ENABLE_EXPORTS ON)
-    target_sources(kamite PRIVATE kamite/game_library.cpp)
+    target_sources(kamite PRIVATE kamite/game_library.cpp kamite/game_library_check.cpp)
+    target_include_directories(kamite PRIVATE "${CMAKE_SOURCE_DIR}/runtime/ps2xRuntime/src/lib/vu") # the check's view
     target_compile_definitions(kamite PRIVATE KAMITE_SPLIT_GAME_CODE=1 PS2X_SPLIT_GAME_CODE=1)
     target_compile_definitions(ps2_runtime PRIVATE PS2X_SPLIT_GAME_CODE=1)
     # The runtime's own runner (runtime/ps2xRuntime, its register_functions.cpp) links this runtime too, which now
@@ -691,9 +709,19 @@ if(KAMITE_SPLIT_GAME_CODE)
 
     # The real pair, every build: GHR loads the library it was built with (tools-free: --check-game-library).
     if(KAMITE_BUILD_TESTS)
+        # ...and the two see one copy of the state they share (game_library_shared_state.h).
         add_test(NAME split_game_library COMMAND kamite --check-game-library)
         set_tests_properties(split_game_library PROPERTIES
             ENVIRONMENT "KAMITE_GAME_LIBRARY=$<TARGET_FILE:ghr_game>;KAMITE_HOME=${CMAKE_BINARY_DIR}/split_game_library_home"
-            PASS_REGULAR_EXPRESSION "game library: loaded")
+            PASS_REGULAR_EXPRESSION "shared state: 7 of 7 one object")
+        # Windows' rule on Linux: a DLL never shares a header-defined static with the program. The same library linked
+        # with -Bsymbolic binds its own data the same way, so state left in a header (instead of behind
+        # PS2X_SHARED_STATE, ps2_runtime_api.h) shows here as two copies, as it would on Windows.
+        kamite_game_library(ghr_game_local)
+        target_link_options(ghr_game_local PRIVATE -Wl,-Bsymbolic)
+        add_test(NAME split_shared_state_windows_rule COMMAND kamite --check-game-library)
+        set_tests_properties(split_shared_state_windows_rule PROPERTIES
+            ENVIRONMENT "KAMITE_GAME_LIBRARY=$<TARGET_FILE:ghr_game_local>;KAMITE_HOME=${CMAKE_BINARY_DIR}/split_shared_state_home"
+            PASS_REGULAR_EXPRESSION "shared state: 7 of 7 one object")
     endif()
 endif()

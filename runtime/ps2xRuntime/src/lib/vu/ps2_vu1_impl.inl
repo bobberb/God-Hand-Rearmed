@@ -9,6 +9,7 @@
 #include "runtime/gs/gs_frontend.h"
 #include "runtime/ps2_memory.h"
 #include "ps2_vu1_detail.h"
+#include "ps2_runtime_api.h"
 
 #include <algorithm>
 #include <bit>
@@ -22,7 +23,7 @@
 
 static inline bool vu1JrUsesDelayedVi()
 {
-    static const bool delayed = [] { const char *v = std::getenv("PS2X_VU1_JR_DELAYED_VI"); return v && *v == '1'; }();
+    static const bool delayed = [] { const char *v = std::getenv("PS2X_VU1_JR_DELAYED_VI"); return v && *v == '1'; }(); // shared-state: an environment flag, read once per module
     return delayed;
 }
 
@@ -59,7 +60,15 @@ namespace vu1_impl
         bool forward = true;
     };
 
+#if !PS2X_SHARED_STATE
     inline thread_local Vu1PacketSink *packetSink = nullptr;
+#define PS2X_VU1_PACKET_SINK packetSink
+#else
+    // One sink per thread for the program and the game library (ps2_runtime_api.h): the runtime sets it, the VU1
+    // code compiled ahead of time writes to it. A function: Windows cannot import a thread_local variable.
+    PS2X_RUNTIME_API Vu1PacketSink *&packetSinkSlot(); // src/lib/ps2_shared_state.cpp
+#define PS2X_VU1_PACKET_SINK (::vu1_impl::packetSinkSlot())
+#endif
 }
 
 using namespace vu1_impl;
@@ -958,7 +967,7 @@ inline void VU1Interpreter::finishXgkick()
     if (!m_xgkick.active)
         return;
 
-    if (Vu1PacketSink *sink = packetSink)
+    if (Vu1PacketSink *sink = PS2X_VU1_PACKET_SINK)
     {
         sink->packets.emplace_back(m_xgkick.packet.data(), m_xgkick.packet.data() + m_xgkick.totalBytes);
         if (!sink->forward)
@@ -2480,14 +2489,25 @@ struct Vu1NormShadow
     alignas(16) float norm[33][4];
 };
 
+#if !PS2X_SHARED_STATE
 inline Vu1NormShadow vu1NormShadow;
 // VU0 micro mode runs compiled code too (game thread), with its own shadow: its registers are reloaded from the EE
 // context on every call, so it must never share or reuse VU1's.
 inline Vu1NormShadow vu0NormShadow;
+#else
+// One of each for the program and the game library (ps2_runtime_api.h): the runtime invalidates them (ps2_vu1_core.cpp),
+// the compiled VU code reads them. Two copies would leave the compiled code's stale.
+extern PS2X_RUNTIME_API Vu1NormShadow vu1NormShadow; // src/lib/ps2_shared_state.cpp
+extern PS2X_RUNTIME_API Vu1NormShadow vu0NormShadow;
+#endif
 // PS2X_VU0_LEAN: true while VU0's interpreter-only scheduler arrays (ready cycles, latest writes, VF/VI/ACC write
 // pipelines) are still all zero since the last full resetScheduler(). Only the interpreter touches them, so a VU0 call
 // that ran entirely in compiled code leaves them clean and the next call can skip clearing them (~3.5 KB per VCALLMS).
+#if !PS2X_SHARED_STATE
 inline bool vu0SchedulerClean = false;
+#else
+extern PS2X_RUNTIME_API bool vu0SchedulerClean; // one for both halves: the runtime clears it (ps2_vu1_core.cpp)
+#endif
 // Cycles the lean VU0 call skips ahead between calls instead of clearing the ready-cycle arrays: the compiled code
 // keeps m_vfReady/m_viReady/m_accReady (stalls between blocks) and never sets one more than a few cycles past the cycle
 // it ends on (VF/VI latency <= 4), so after the skip every old entry is already "ready", as if cleared.
@@ -2518,7 +2538,7 @@ struct VU1InterpreterAccess
     // function-local static const costs a thread-safe initialization check on every call).
     static bool vu0LeanCheck()
     {
-        static int mode = -1;
+        static int mode = -1; // shared-state: an environment setting, read once per module
         if (mode < 0)
         {
             const char *value = std::getenv("PS2X_VU0_LEAN");
@@ -2552,7 +2572,7 @@ struct VU1InterpreterAccess
         const bool check = vu0LeanCheck();
         if (check && keep)
         {
-            static uint64_t calls = 0u, stale = 0u;
+            static uint64_t calls = 0u, stale = 0u; // shared-state: a debug count; per module is fine
             ++calls;
             for (uint32_t reg = 0u; reg < 33u; ++reg)
             {
@@ -2596,7 +2616,7 @@ struct VU1InterpreterAccess
                     const auto *bytes = static_cast<const uint8_t *>(data);
                     return std::any_of(bytes, bytes + size, [](uint8_t b) { return b != 0u; });
                 };
-                static uint64_t calls = 0u, reports = 0u;
+                static uint64_t calls = 0u, reports = 0u; // shared-state: a debug count; per module is fine
                 const char *dirty = latest > vu.m_cycle                                                 ? "ready cycle ahead"
                                     : nonzero(vu.m_vfLatestWrite.data(), sizeof(vu.m_vfLatestWrite))   ? "vfLatestWrite"
                                     : nonzero(vu.m_viLatestWrite.data(), sizeof(vu.m_viLatestWrite))   ? "viLatestWrite"
@@ -3663,7 +3683,7 @@ struct VU1InterpreterAccess
 
     static VU1_FORCE_INLINE bool simdClipEnabled()
     {
-        static const bool enabled = []
+        static const bool enabled = [] // shared-state: an environment flag, read once per module
         {
             const char *value = std::getenv("PS2X_VU1_SIMD_CLIP");
             return !value || *value != '0';
