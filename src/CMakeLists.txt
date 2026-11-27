@@ -439,6 +439,12 @@ if(KAMITE_SPLIT_GAME_CODE AND WIN32)
     # keeps it.
     target_link_libraries(kamite PRIVATE ps2_runtime)
     target_compile_options(ps2_runtime PRIVATE /GL-)
+    # KAMITE_LTO (root CMakeLists.txt, applied after this directory) would put /GL back on the runtime and the IOP and
+    # give the export scanner IR objects: a broken .def, found only at the game library's link.
+    if(KAMITE_LTO)
+        message(FATAL_ERROR "KAMITE_SPLIT_GAME_CODE and KAMITE_LTO do not go together with MSVC (GHR.exe's exports are "
+                            "read from the runtime's objects, which /GL turns into compiler IR)")
+    endif()
     set(KAMITE_EXPORT_OBJECTS "${CMAKE_CURRENT_BINARY_DIR}/kamite_generated/ghr_export_objects.txt")
     set(KAMITE_EXPORT_DEF "${CMAKE_CURRENT_BINARY_DIR}/kamite_generated/ghr_exports.def")
     file(GENERATE OUTPUT "${KAMITE_EXPORT_OBJECTS}"

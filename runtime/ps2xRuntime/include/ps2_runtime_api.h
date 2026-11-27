@@ -12,9 +12,9 @@
 //     accessor functions above. Windows: exported by the program, imported by the game library (PS2X_GAME_CODE); a DLL
 //     can read data from the program only through __declspec(dllimport). Linux: default visibility.
 //     Plain functions the game code calls do not need it: Windows routes those through the import library's thunks.
-//     Exporting the program's functions for that (an import library, WINDOWS_EXPORT_ALL_SYMBOLS or a .def) is the
-//     Windows layout's own step, not made yet; so is relying on one shared C runtime (/MD) for the log's std::deque,
-//     which the game library's inline code fills and the program owns.
+//     GHR.exe exports the runtime's and the IOP's symbols through a .def (src/CMakeLists.txt) and the game DLL links
+//     GHR.lib. Both halves use the one shared C runtime (/MD, CMake's default here), which the log's std::deque relies
+//     on: the game library's inline code fills it, the program owns it.
 // Without PS2X_SHARED_STATE (every build but the split one) it is nothing and the headers keep their inline forms:
 // the normal build's code is unchanged.
 //

@@ -166,7 +166,10 @@ jobs:
       - name: Build GHR.exe (no game code) and ghr_game.dll
         run: |
           python -I build.py build
-          if ($LASTEXITCODE) { exit 1 }
+          $ghr = $LASTEXITCODE
+          # build.py writes each build's log to last_build.log: GHR.exe's (the export step's) is kept apart.
+          Copy-Item build/port/last_build.log build/port/last_build_ghr.log -ErrorAction SilentlyContinue
+          if ($ghr) { exit 1 }
           python -I build.py build ghr_game
           if ($LASTEXITCODE) { exit 1 }
       - name: GHR.exe without the game library, then with it
@@ -177,10 +180,11 @@ jobs:
           Get-ChildItem $bin -File | Format-Table Name, Length
           $env:KAMITE_HOME = "$PWD/split_home"
           New-Item -ItemType Directory -Force $env:KAMITE_HOME | Out-Null
-          # Without the library (another name): exit 8, "missing".
+          # Without the library (another name): exit 8, "missing" (8 also stands for a refused library: the text says which).
           $env:KAMITE_GAME_LIBRARY = "$PWD/$bin/no_such_library.dll"
           & "$bin/GHR.exe" --check-game-library | Tee-Object -Variable out
           if ($LASTEXITCODE -ne 8) { Write-Error "without the library: exit $LASTEXITCODE, not 8"; exit 1 }
+          if (($out -join "`n") -notmatch "game library: missing") { Write-Error "without the library: not 'missing'"; exit 1 }
           # With it: loaded, and one object for every piece of shared state.
           $env:KAMITE_GAME_LIBRARY = "$PWD/$bin/ghr_game.dll"
           & "$bin/GHR.exe" --check-game-library | Tee-Object -Variable out
@@ -195,5 +199,7 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: windows-split-build-log
-          path: build/port/last_build.log
+          path: |
+            build/port/last_build_ghr.log
+            build/port/last_build.log
           if-no-files-found: ignore

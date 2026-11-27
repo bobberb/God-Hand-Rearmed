@@ -120,9 +120,12 @@ namespace kamite::game_library
     bool registerVu1Programs();
     // A symbol the loaded library exports (dlsym / GetProcAddress); null when it has none.
     void *findSymbol(void *handle, const char *name);
-    // --check-game-library: compares the runtime state the library sees with GHR's (game_library_shared_state.h),
-    // printing a line per object. 0 = one object each, 1 = at least one differs, -1 = the library has no probe
-    // (ghr_game_shared_state, in every library built since it existed). game_library_check.cpp.
-    int checkSharedState(const Result &loaded);
+    // Compares the runtime state the library sees with GHR's (game_library_shared_state.h); with `print`, a line per
+    // object (--check-game-library). 0 = one object each, 1 = at least one differs, -1 = the library has no probe
+    // (ghr_game_shared_state, in every library built since it existed). Every load runs it quietly: a library bound to
+    // another runtime (a second GHR.exe Windows found, a header static put back) is refused. game_library_check.cpp.
+    int checkSharedState(const Result &loaded, bool print = true);
+    // A path as UTF-8 text for messages (path.string() throws on Windows for characters outside the ANSI code page).
+    std::string pathText(const std::filesystem::path &path);
 #endif
 }

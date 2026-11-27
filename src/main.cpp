@@ -897,6 +897,17 @@ namespace
         gl::Result r = gl::load(gl::candidates(std::getenv("KAMITE_GAME_LIBRARY"), kamite::paths::home(),
                                                kamite::paths::programDir()),
                                 KAMITE_GAME_INTERFACE);
+        // Bound to this GHR's runtime, or refused: a library whose view of the shared state differs (another GHR.exe
+        // Windows loaded for it, a header static put back) would run against a runtime nobody initialized.
+        if (r.status == gl::Status::Loaded && gl::checkSharedState(r, false) == 1)
+        {
+            gl::Result refused;
+            refused.status = gl::Status::LoadFailed;
+            refused.path = r.path;
+            refused.message = gl::pathText(r.path) + " does not share this GHR's runtime state (run GHR --check-game-library "
+                                                     "for which part): build the game's code again";
+            return refused;
+        }
         if (r.status == gl::Status::Loaded)
         {
             ps2x::g_gameTable = {r.entry->functions, r.entry->base, r.entry->end, r.entry->slotCount};
@@ -918,7 +929,7 @@ namespace
         const kamite::game_library::Result r = loadGameLibrary();
         std::printf("game library: %s\n", kamite::game_library::statusName(r.status));
         if (!r.path.empty())
-            std::printf("path: %s\n", r.path.string().c_str());
+            std::printf("path: %s\n", kamite::game_library::pathText(r.path).c_str());
         std::printf("interface: %s\n", KAMITE_GAME_INTERFACE);
         if (r.entry)
             std::printf("table: 0x%08X..0x%08X, %u slots%s\n", r.entry->base, r.entry->end, r.entry->slotCount,
@@ -1182,7 +1193,7 @@ int main(int argc, char *argv[])
             const kamite::game_library::Result library = loadGameLibrary();
             if (library.status == kamite::game_library::Status::Loaded)
             {
-                KM_INFO(Boot, "game library: " << library.path.string());
+                KM_INFO(Boot, "game library: " << kamite::game_library::pathText(library.path));
                 break;
             }
             KM_ERROR(Boot, library.message);
