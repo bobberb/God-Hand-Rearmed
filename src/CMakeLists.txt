@@ -584,9 +584,12 @@ if(KAMITE_SPLIT_GAME_CODE)
             endif()
         endforeach()
     endif()
-    # Every compile definition and option that reaches the generated code or the runtime: the runtime and the two
-    # libraries it passes on, this directory's, and the game targets' own. Unevaluated text (generator expressions
-    # and all): a change in any of it changes the id.
+    # The compile definitions and options set on the runtime, the two libraries it passes on, this directory and the
+    # game targets, as far as they are known here. Unevaluated text (generator expressions and all): a change in any
+    # of it changes the id. Not covered: what is added after this point, namely PS2X_SPLIT_GAME_CODE on the runtime
+    # (below; it changes no layout) and the root CMakeLists.txt's ThinLTO for release builds (after add_subdirectory
+    # (src); no ABI effect). Also not covered: flags the compiler wrapper adds at compile time (tools/linux/zig-c++
+    # passes $NIX_CFLAGS_COMPILE on): the two halves must be built with the same zig in a clean environment.
     string(TOUPPER "${CMAKE_BUILD_TYPE}" KAMITE_BUILD_TYPE_UPPER)
     string(APPEND KAMITE_INTERFACE_TEXT
         "compiler ${CMAKE_CXX_COMPILER_ID} ${CMAKE_CXX_COMPILER_VERSION} ${CMAKE_CXX_COMPILER_TARGET}\n"

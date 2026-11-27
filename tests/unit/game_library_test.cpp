@@ -63,6 +63,12 @@ namespace
 
     void hostFunction(uint8_t *, R5900Context *, PS2Runtime *) { g_notes.push_back(7); }
 
+    // A type of this half's own, as EeDispatcherTransfer is GHR's.
+    struct HostTransfer
+    {
+        int value;
+    };
+
     std::string readAll(const fs::path &file)
     {
         std::ifstream in(file, std::ios::binary);
@@ -271,6 +277,27 @@ int main(int argc, char **argv)
         auto inlineVariable = symbol<int *(*)()>(fixture("fixture_good"), "fixtureSharedInlineVariable");
         check(counter && counter() == &sharedCounter(), "good: an inline function's static is one object in both");
         check(inlineVariable && inlineVariable() == &sharedInlineVariable, "good: an inline variable is one object in both");
+
+        // This half's exception through the library's frames, caught here by its type, the library's cleanup run.
+        auto callThrough = symbol<void (*)(void (*)())>(fixture("fixture_good"), "fixtureCallThrough");
+        check(callThrough != nullptr, "good: fixtureCallThrough found");
+        if (callThrough)
+        {
+            bool caughtTransfer = false;
+            try
+            {
+                callThrough([] { throw HostTransfer{42}; });
+            }
+            catch (const HostTransfer &transfer)
+            {
+                caughtTransfer = transfer.value == 42;
+            }
+            catch (...)
+            {
+            }
+            check(caughtTransfer, "good: the program's exception crosses the library's frames and is caught by type here");
+            check(notesOf(9) == 1 && notesOf(10) == 0, "good: the library's destructor ran on the way through");
+        }
 
         // A std::string made by the library, grown and freed by this half.
         auto newString = symbol<std::string *(*)()>(fixture("fixture_good"), "fixtureNewString");

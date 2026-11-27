@@ -84,6 +84,18 @@ extern "C"
     // catches it by type: with the C++ library linked statically into each half (zig's libc++), that only works if
     // both halves agree on the exception's type.
     __attribute__((visibility("default"))) void fixtureThrow() { throw std::runtime_error("thrown in the library"); }
+    // The other direction, which the game takes on every guest thread switch: GHR throws its own type
+    // (EeDispatcherTransfer, EeScheduler.cpp) through generated-code frames, now the library's, and catches it itself.
+    // The library's frame here has a destructor, which must run on the way through (note 9).
+    __attribute__((visibility("default"))) void fixtureCallThrough(void (*hostFunction)())
+    {
+        struct Cleanup
+        {
+            ~Cleanup() { ghrTestHostNote(9); }
+        } cleanup;
+        hostFunction();
+        ghrTestHostNote(10); // never reached: the host function throws
+    }
     // Memory from one half freed by the other.
     __attribute__((visibility("default"))) std::string *fixtureNewString() { return new std::string(100, 'x'); }
 
