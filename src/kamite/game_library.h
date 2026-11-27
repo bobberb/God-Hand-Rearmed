@@ -1,13 +1,16 @@
 #pragma once
 
-// The split game code (prototype, Linux, -DKAMITE_SPLIT_GAME_CODE=ON): the recompiled game code (the main program,
-// the 81 room modules, the VU1 microcode) is a shared library of its own, libghr_game.so, which GHR loads at start
+// The split game code (prototype, -DKAMITE_SPLIT_GAME_CODE=ON; Linux, and Windows with MSVC): the recompiled game code
+// (the main program, the 81 room modules, the VU1 microcode) is a shared library of its own (libghr_game.so on Linux,
+// ghr_game.dll on Windows), which GHR loads at start
 // instead of linking it in. GHR, the launcher and the runtime then build and ship with no game code in them, and the
 // library is built on the player's machine from their own disc (GHR-Tech-Deck issue #1).
 //
 // The two halves meet in one place: the library exports ghr_game_library(), which returns an Entry. Everything else
 // the generated code needs (the runtime's functions and globals) it takes from GHR itself, which is linked with
-// ENABLE_EXPORTS (-rdynamic) so the library's undefined symbols resolve against the program that loads it. That also
+// ENABLE_EXPORTS (-rdynamic) so the library's undefined symbols resolve against the program that loads it. On Windows
+// GHR.exe exports the runtime through a .def file and the DLL links GHR.lib, its import library; a DLL never shares a
+// header-defined static with the program there, which is what ps2_runtime_api.h's shared state is for. On Linux it also
 // keeps one copy of every inline variable and function-local static the runtime headers define (the library's
 // references bind to GHR's), which is why the library is not linked with -Bsymbolic or hidden visibility. It is linked
 // with -Bsymbolic-functions: its own functions bind inside it (game-to-game calls skip the PLT), its data does not.
@@ -16,8 +19,9 @@
 //
 // The interface id: both halves compile against the same runtime headers, struct layouts, macros and compiler, or the
 // library's code is wrong for this GHR. src/CMakeLists.txt hashes all of that (SHA-256) into
-// kamite_generated/kamite/game_interface.h at configure time. The library carries the id twice: in an ELF section
-// (.ghr_interface), which load() reads from the file before running any of the library's code, and in its Entry.
+// kamite_generated/kamite/game_interface.h at configure time. The library carries the id twice: in a section of its
+// file (ELF .ghr_interface, PE .ghrid: a PE section name has 8 bytes at most), which load() reads from the file before
+// running any of the library's code, and in its Entry.
 // A different id = built for another GHR: the library is refused, and the player builds it again.
 //
 // This header is included by both halves and by tests/unit/game_library_test.cpp, so it names the runtime's types
@@ -42,9 +46,14 @@ namespace kamite::game_library
     // PS2Runtime::RecompiledFunction (game_library_entry.cpp checks they are the same type).
     using GameFunction = void (*)(uint8_t *, R5900Context *, PS2Runtime *);
 
+#if defined(_WIN32)
+    constexpr const char *kFileName = "ghr_game.dll";
+#else
     constexpr const char *kFileName = "libghr_game.so";
+#endif
     constexpr const char *kEntrySymbol = "ghr_game_library";
-    constexpr const char *kSectionName = ".ghr_interface";
+    constexpr const char *kElfSectionName = ".ghr_interface";
+    constexpr const char *kPeSectionName = ".ghrid"; // PE section names: 8 bytes at most
     constexpr const char *kSectionPrefix = "GHR-GAME-INTERFACE:"; // then the id (64 hex digits), then NUL
     constexpr size_t kIdLength = 64;
 
@@ -97,6 +106,7 @@ namespace kamite::game_library
 
     // The interface id in a file's .ghr_interface section, read from the file without loading it. "" (and why, in
     // `error`) when the file is not a 64-bit little-endian ELF or has no well-formed section.
+    // Either format, whatever the platform (the tests read both on Linux).
     std::string readInterfaceId(const std::filesystem::path &file, std::string &error);
 
     // Loads the first candidate that exists and checks it against `expectedId`. Nothing of the library runs before
@@ -108,6 +118,8 @@ namespace kamite::game_library
     void use(const Entry *entry);
     // Registers the library's VU1 programs; false (and nothing done) when it has none.
     bool registerVu1Programs();
+    // A symbol the loaded library exports (dlsym / GetProcAddress); null when it has none.
+    void *findSymbol(void *handle, const char *name);
     // --check-game-library: compares the runtime state the library sees with GHR's (game_library_shared_state.h),
     // printing a line per object. 0 = one object each, 1 = at least one differs, -1 = the library has no probe
     // (ghr_game_shared_state, in every library built since it existed). game_library_check.cpp.

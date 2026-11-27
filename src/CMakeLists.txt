@@ -34,10 +34,10 @@ file(GLOB KAMITE_GENERATED_SOURCES CONFIGURE_DEPENDS "${KAMITE_GENERATED_DIR}/*.
 # The split game code (prototype, Linux; src/kamite/game_library.h, GHR-Tech-Deck issue #1): the generated code goes
 # into libghr_game.so, which GHR loads at start, instead of into GHR. GHR then builds with no game code in it, and the
 # library is built separately (`ninja ghr_game`), as a player's machine would from their own disc. Off: as before.
-option(KAMITE_SPLIT_GAME_CODE "Prototype (Linux): the game code as libghr_game.so, loaded by GHR at start" OFF)
+option(KAMITE_SPLIT_GAME_CODE "Prototype (Linux, Windows/MSVC): the game code as a library GHR loads at start" OFF)
 if(KAMITE_SPLIT_GAME_CODE)
-    if(NOT CMAKE_SYSTEM_NAME STREQUAL "Linux" OR ANDROID)
-        message(FATAL_ERROR "KAMITE_SPLIT_GAME_CODE is Linux only so far (the loader reads ELF and uses dlopen)")
+    if(ANDROID OR APPLE OR NOT (CMAKE_SYSTEM_NAME STREQUAL "Linux" OR (WIN32 AND MSVC)))
+        message(FATAL_ERROR "KAMITE_SPLIT_GAME_CODE: Linux, or Windows with MSVC, so far")
     endif()
     if(CMAKE_VERSION VERSION_LESS 3.27)
         message(FATAL_ERROR "KAMITE_SPLIT_GAME_CODE needs CMake 3.27 or later ($<COMPILE_ONLY:>)")
@@ -429,7 +429,30 @@ target_include_directories(kamite PRIVATE
     "${CMAKE_CURRENT_SOURCE_DIR}"
     "${CMAKE_CURRENT_BINARY_DIR}/kamite_generated"
     "${KAMITE_GENERATED_DIR}")
-if(KAMITE_SPLIT_GAME_CODE)
+if(KAMITE_SPLIT_GAME_CODE AND WIN32)
+    # Windows: GHR.exe exports the runtime (and the IOP) through a .def file listing every symbol of their objects,
+    # made by CMake's own export scanner (`cmake -E __create_def`, which WINDOWS_EXPORT_ALL_SYMBOLS uses; that property
+    # covers a target's own objects only, not the static libraries it links). The exports also pull every runtime
+    # object into GHR.exe, as the whole-archive link does on Linux, and make GHR.lib, the import library the game DLL
+    # links. /GL- on the runtime: its RelWithDebInfo /GL (ReleaseMode.cmake) makes objects of compiler IR, which have no
+    # symbol table to scan. The split build gives up the runtime's whole-program optimization for it; the normal build
+    # keeps it.
+    target_link_libraries(kamite PRIVATE ps2_runtime)
+    target_compile_options(ps2_runtime PRIVATE /GL-)
+    set(KAMITE_EXPORT_OBJECTS "${CMAKE_CURRENT_BINARY_DIR}/kamite_generated/ghr_export_objects.txt")
+    set(KAMITE_EXPORT_DEF "${CMAKE_CURRENT_BINARY_DIR}/kamite_generated/ghr_exports.def")
+    file(GENERATE OUTPUT "${KAMITE_EXPORT_OBJECTS}"
+        CONTENT "$<JOIN:$<TARGET_OBJECTS:ps2_runtime>,\n>\n$<JOIN:$<TARGET_OBJECTS:ps2_iop>,\n>\n")
+    add_custom_command(OUTPUT "${KAMITE_EXPORT_DEF}"
+        COMMAND "${CMAKE_COMMAND}" -E __create_def "${KAMITE_EXPORT_DEF}" "${KAMITE_EXPORT_OBJECTS}"
+        DEPENDS ps2_runtime ps2_iop "${KAMITE_EXPORT_OBJECTS}"
+        COMMENT "Listing the runtime's symbols for GHR.exe to export (the game DLL's imports)"
+        VERBATIM)
+    add_custom_target(kamite_exports DEPENDS "${KAMITE_EXPORT_DEF}")
+    add_dependencies(kamite kamite_exports)
+    target_link_options(kamite PRIVATE "/DEF:${KAMITE_EXPORT_DEF}")
+    set_property(TARGET kamite APPEND PROPERTY LINK_DEPENDS "${KAMITE_EXPORT_DEF}")
+elseif(KAMITE_SPLIT_GAME_CODE)
     # Whole archives: the library's generated code calls runtime functions nothing in GHR calls (ps2_runtime_macros.h's
     # ps2EeDiv -> ps2ee::div), and a plain static link keeps only the members GHR itself needs. ENABLE_EXPORTS can
     # export only what was linked. Its own feature, not CMake's WHOLE_ARCHIVE: that one wraps the archive in
@@ -672,7 +695,14 @@ if(KAMITE_SPLIT_GAME_CODE)
         if(EXISTS "${KAMITE_GENERATED_DIR}/KAMITE_STUB")
             target_compile_definitions(${name} PRIVATE KAMITE_GAME_STAND_IN=1)
         endif()
-        set_target_properties(${name} PROPERTIES LIBRARY_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/bin")
+        # A DLL is a RUNTIME output on Windows, a .so a LIBRARY one on Linux: both next to GHR.
+        set_target_properties(${name} PROPERTIES LIBRARY_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/bin"
+                                                 RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/bin")
+        if(WIN32)
+            # Windows binds a DLL's imports at link time: the runtime's functions and data from GHR.exe, through
+            # GHR.lib (kamite's import library, ENABLE_EXPORTS below).
+            target_link_libraries(${name} PRIVATE kamite)
+        endif()
         if(KAMITE_LINKER_HAS_BSYMBOLIC_FUNCTIONS)
             target_link_options(${name} PRIVATE -Wl,-Bsymbolic-functions)
         endif()
@@ -699,7 +729,11 @@ if(KAMITE_SPLIT_GAME_CODE)
         set(KAMITE_RUNNER_REFUSAL "${CMAKE_CURRENT_BINARY_DIR}/kamite_generated/split_refuses_runner.h")
         file(WRITE "${KAMITE_RUNNER_REFUSAL}"
             "#error ps2EntryRunner cannot run on a runtime built with KAMITE_SPLIT_GAME_CODE (it reads the game library's table)\n")
-        target_compile_options(ps2EntryRunner PRIVATE -include "${KAMITE_RUNNER_REFUSAL}")
+        if(MSVC)
+            target_compile_options(ps2EntryRunner PRIVATE "/FI${KAMITE_RUNNER_REFUSAL}")
+        else()
+            target_compile_options(ps2EntryRunner PRIVATE -include "${KAMITE_RUNNER_REFUSAL}")
+        endif()
         set_target_properties(ps2EntryRunner PROPERTIES EXCLUDE_FROM_ALL ON)
     endif()
 
@@ -710,6 +744,8 @@ if(KAMITE_SPLIT_GAME_CODE)
         set_tests_properties(split_game_library PROPERTIES
             ENVIRONMENT "KAMITE_GAME_LIBRARY=$<TARGET_FILE:ghr_game>;KAMITE_HOME=${CMAKE_BINARY_DIR}/split_game_library_home"
             PASS_REGULAR_EXPRESSION "shared state: 9 of 9 one object")
+        # On Windows split_game_library is the real rule (a DLL never shares a header-defined static); on Linux:
+        if(NOT WIN32)
         # Windows' rule on Linux: a DLL never shares a header-defined static with the program. The same library linked
         # with -Bsymbolic binds its own data the same way, so one of the 9 probed objects left in a header (instead of
         # behind PS2X_SHARED_STATE, ps2_runtime_api.h) shows here as two copies, as it would on Windows. Except a
@@ -720,6 +756,7 @@ if(KAMITE_SPLIT_GAME_CODE)
         set_tests_properties(split_shared_state_windows_rule PROPERTIES
             ENVIRONMENT "KAMITE_GAME_LIBRARY=$<TARGET_FILE:ghr_game_local>;KAMITE_HOME=${CMAKE_BINARY_DIR}/split_shared_state_home"
             PASS_REGULAR_EXPRESSION "shared state: 9 of 9 one object")
+        endif()
     endif()
 endif()
 

@@ -3,8 +3,6 @@
 #include "kamite/game_library.h"
 #include "kamite/game_library_shared_state.h"
 
-#include <dlfcn.h>
-
 #include <cstdio>
 
 namespace kamite::game_library
@@ -12,7 +10,7 @@ namespace kamite::game_library
     int checkSharedState(const Result &loaded)
     {
         using Probe = size_t (*)(const void **, size_t);
-        auto probe = loaded.handle ? reinterpret_cast<Probe>(dlsym(loaded.handle, "ghr_game_shared_state")) : nullptr;
+        auto probe = loaded.handle ? reinterpret_cast<Probe>(findSymbol(loaded.handle, "ghr_game_shared_state")) : nullptr;
         if (!probe)
         {
             std::printf("shared state: not checked (the library has no probe: built before it had one)\n");
